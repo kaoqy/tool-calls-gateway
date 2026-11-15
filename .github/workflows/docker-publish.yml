@@ -147,6 +147,11 @@ jobs:
           user=$(docker inspect --format '{{.Config.User}}' toolcall-gateway:smoke)
           echo "container user=$user"
           test "$user" = "node"
+
+          # 设置页与设置 API 也必须可用（容器内默认只读挂载 /app/data）
+          curl -fsS http://127.0.0.1:8787/admin | grep -q 'id="upstreamBaseUrl"'
+          curl -fsS http://127.0.0.1:8787/admin/api/settings | grep -q '"sources"'
+
           docker logs tc-smoke | tail -n 20
           docker rm -f tc-smoke
 
