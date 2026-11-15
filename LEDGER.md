@@ -347,6 +347,22 @@
 | `npm run gate` | **PASS (13/14 通过, 1 跳过)**，新增 **M15 PASS**；M9 需 --live |
 | 浏览器实测 | 登录后概览显示 7 条请求 / 错误率 14.3%（invalid_json×1）/ 工具命中率 100% / P50 4ms / P95 33ms / 媒体 1 图；测试台点「发送」返回 `HTTP 200 · 8ms · 模拟模式 · finish=tool_calls · tool_calls=1` |
 ## 5. 未验证项汇总
+**全量回归（本轮实际执行，2026-11-15 17:0x）**
+| 项 | 结果 |
+| --- | --- |
+| `npm test` | 136/136 |
+| `node scripts/gate.mjs` | PASS (13/14, M9 跳过) —— M0~M6、M8、M10~M12、M14、M15 全绿 |
+| `scripts/e2e_passthrough.mjs` | 4/4 |
+| `scripts/e2e_stream_tool.mjs` | 3/3 |
+| `scripts/e2e_mock.mjs` | PASS |
+| `scripts/e2e_media.mjs` | 15/15 |
+| `scripts/e2e_console.mjs` | 21/21 |
+| `scripts/e2e_codex.mjs` / `e2e_live.mjs` / `hitrate.mjs` | dry 均 exit 0（live 需 --live，未消耗额度） |
+| `scripts/conformance.mjs` | 35/35 PASS（dry） |
+| 密钥扫描 / 依赖 / BOM | 无真实形态密钥；零依赖；BOM 已清（PowerShell 5.1 的 `Set-Content -Encoding utf8` 会加 BOM，`deploy.sh` 带 BOM 会破坏 shebang） |
+| `sh -n deploy.sh` | **本机无法验证**（Windows 无 sh/WSL 发行版）；由 CI 的「部署脚本语法检查」步骤用 `sh -n` + `bash -n` 覆盖，已绿 |
+
+**CI（tag `v1.5.0`，run `43698347472`）**：测试（Node 20/22）、构建推送（amd64+arm64）、镜像冒烟五步全绿（零配置起容器 / 未初始化 503 / 首次初始化 / 重启持久化 / 多模态端到端）。镜像 `ghcr.io/kaoqy/tool-calls-gateway:v1.5.0`，digest `sha256:501357bc…`。
 
 | 项 | 状态 | 原因 | 复现命令 |
 | --- | --- | --- | --- |
@@ -700,6 +716,6 @@ docker run -d --name toolcall-gateway -p 8787:8787 \
 | `v1.2.0` | `19d4339` | `43683536879` ✅ | `sha256:4eaa009e…` | 设置页 UI 重构（侧边栏/脏状态/模型表/接入信息）+ `test/ui.test.mjs` 回归防线；README 部署章节重写 |
 | `v1.3.0` | `2adc8bc` | `43687684159` ✅ | `sha256:5e57930d…` |
 | `v1.4.0` | `6db1c25` | `43696105970` ✅ | `sha256:7212136f…` |
-| `v1.5.0` | 待填 | 待填 | 待填 | **控制台可视化**：/admin 新增概览（请求/错误率/工具命中率/P50-P95/媒体计数 + 最近请求表）、请求测试台、四种接入片段、主题切换；新增 `src/metrics.mjs`（内存环形缓冲，只存请求形状）；`/healthz` 增加 `version` 与 `uptimeMs`；README 收敛为「介绍 + 已部署一键更新」，完整文档移到 `docs/FULL.md` | **多模态修复**：模拟模式不再丢弃图片；新增 `src/content.mjs`（归一化/计数/fail-open）、`imageMode` 三态、16MB 上限 + 边读边计、媒体超时放宽、`upstream_vision_unsupported` 归一化、视觉自检 | **零配置部署**：去掉全部必需 env，首次访问 /admin 创建管理员 + 配上游；新增 `src/auth.mjs`（scrypt/会话/节流）+ 初始化向导 + 账号分区；未配上游时 /v1 明确 503 |
+| `v1.5.0` | `cb65728` | `43698347472` ✅ | `sha256:501357bc…` | **控制台可视化**：/admin 新增概览（请求/错误率/工具命中率/P50-P95/媒体计数 + 最近请求表）、请求测试台、四种接入片段、主题切换；新增 `src/metrics.mjs`（内存环形缓冲，只存请求形状）；`/healthz` 增加 `version` 与 `uptimeMs`；README 收敛为「介绍 + 已部署一键更新」，完整文档移到 `docs/FULL.md` | **多模态修复**：模拟模式不再丢弃图片；新增 `src/content.mjs`（归一化/计数/fail-open）、`imageMode` 三态、16MB 上限 + 边读边计、媒体超时放宽、`upstream_vision_unsupported` 归一化、视觉自检 | **零配置部署**：去掉全部必需 env，首次访问 /admin 创建管理员 + 配上游；新增 `src/auth.mjs`（scrypt/会话/节流）+ 初始化向导 + 账号分区；未配上游时 /v1 明确 503 |
 
 镜像：`ghcr.io/kaoqy/tool-calls-gateway:{v1.1.1,1.1.1,1.1,latest,sha-*}`，平台 `linux/amd64` + `linux/arm64`。
