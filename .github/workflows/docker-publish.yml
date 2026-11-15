@@ -1,4 +1,4 @@
-﻿name: ci-and-publish
+name: ci-and-publish
 
 # 测试 → 构建多架构镜像 → 推送到 GitHub Container Registry (GHCR)
 # 打 tag（如 v1.0.0）时产出 ghcr.io/<owner>/<repo>:v1.0.0
@@ -234,26 +234,26 @@ jobs:
           done
           curl -fsS http://127.0.0.1:18990/healthz
 
-          docker rm -f tc-vision >/dev/null 2>&1 || true
-          docker run -d --name tc-vision -p 8788:8787 \
-            --add-host=host.docker.internal:host-gateway \
+          docker rm -f tc-smoke tc-vision >/dev/null 2>&1 || true
+          # 用 host 网络：容器里的 127.0.0.1 就是宿主机，mock 可以直接绑回环，不需要 host-gateway
+          docker run -d --name tc-vision --network host \
             -v tc-vision-data:/app/data \
             toolcall-gateway:smoke
           for i in $(seq 1 40); do
-            if curl -fsS http://127.0.0.1:8788/healthz >/dev/null 2>&1; then break; fi
+            if curl -fsS http://127.0.0.1:8787/healthz >/dev/null 2>&1; then break; fi
             sleep 1
           done
-          curl -fsS http://127.0.0.1:8788/healthz | grep -q '"imageMode":"pass"'
+          curl -fsS http://127.0.0.1:8787/healthz | grep -q '"imageMode":"pass"'
 
           # 初始化（零 env，纯 HTTP）
-          curl -fsS -c /tmp/vision-cookies.txt -X POST http://127.0.0.1:8788/admin/api/setup \
+          curl -fsS -c /tmp/vision-cookies.txt -X POST http://127.0.0.1:8787/admin/api/setup \
             -H 'content-type: application/json' \
-            -d '{"username":"admin","password":"vision-test-password","upstreamBaseUrl":"http://host.docker.internal:18990","upstreamApiKey":"sk-mock","defaultModel":"mock-tool"}' \
+            -d '{"username":"admin","password":"vision-test-password","upstreamBaseUrl":"http://127.0.0.1:18990","upstreamApiKey":"sk-mock","defaultModel":"mock-tool"}' \
             | grep -q '"upstreamBaseUrl"'
 
           # 带 tools + 图片的请求
           printf '{"model":"mock-tool","messages":[{"role":"user","content":[{"type":"text","text":"描述这张图"},{"type":"image_url","image_url":{"url":"data:image/png;base64,%s"}}]}],"tools":[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}}]}' "$PNG" > /tmp/vision.json
-          code=$(curl -s -o /tmp/vision-res.json -w '%{http_code}' -X POST http://127.0.0.1:8788/v1/chat/completions \
+          code=$(curl -s -o /tmp/vision-res.json -w '%{http_code}' -X POST http://127.0.0.1:8787/v1/chat/completions \
             -H 'content-type: application/json' --data-binary @/tmp/vision.json)
           echo "vision request -> $code"
           cat /tmp/vision-res.json | head -c 400; echo

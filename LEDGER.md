@@ -316,6 +316,13 @@
 | `node scripts/gate.mjs` | **PASS (12/13 通过, 1 跳过)**，新增 **M14 PASS**；M9 需 --live |
 | 浏览器实测 | `/admin` 显示「图片处理模式 = pass（来自默认值）」与「视觉自检」按钮，点自检走通（见下方补验） |
 
+
+**CI 首次失败与修复（如实记录）**：
+- run `43695248371`：测试 / 构建 / 其余冒烟全绿，只有新加的「多模态端到端」步骤失败，容器返回 `502 upstream_error: fetch failed`。
+- 原因：mock 上游只监听 `127.0.0.1:18990`，而容器用 `--add-host=host.docker.internal:host-gateway` 连的是网桥网关地址（172.x），回环监听不接受该连接 —— 是测试脚手架问题，不是网关缺陷。
+- 修复：容器改用 `--network host`（容器里的 127.0.0.1 就是宿主机），mock 仍绑回环；顺带在该步骤开头清掉上一步遗留的 `tc-smoke` 容器，避免 8787 端口冲突。
+- 线上镜像本身已成功构建，但 smoke 结论为 failure，因此把 v1.4.0 重打到修复后的提交，重跑 CI 直到全绿（见下表）。
+
 **未本机验证**：Docker 侧的多模态端到端（本机无 docker）。改为在 CI 冒烟里真跑：主机起 mock 上游 → 容器用 `--add-host=host.docker.internal:host-gateway` 指向它 → 零 env 初始化 → curl 发带图 + tools 的请求 → 断言 200 / `finish_reason=tool_calls` / 上游 `__diag` 里 content 是数组且 image_url 的 sha256 与发送值一致。
 ## 5. 未验证项汇总
 
