@@ -282,6 +282,15 @@
 | 浏览器实测（零配置实例经网关） | `finish_reason=tool_calls`、`get_weather`、`{"city":"北京"}` |
 
 **未验证**：Docker 构建/容器内首次初始化 → 本机无 docker（WSL 无发行版）。改为在 CI 冒烟里真跑：零环境变量起容器 → 断言 `setupRequired:true` → 走完 setup → 重启验持久化 → 旧会话失效。复现见 `.github/workflows/docker-publish.yml` 的 `smoke` job。
+
+**补验（CI，2026-11-15 14:58，run `43687684159`）**：`smoke` job 五步全绿——
+① *零配置起容器（不给任何环境变量）*：`healthz` 断言 `status=ok` / `setupRequired:true` / `upstreamConfigured:false`；
+② *非 root 运行*：`Config.User=node` 且 `/app/data` 可写；
+③ *未初始化时*：`/admin` 是初始化向导、`/v1` 返回 `upstream_not_configured`、无会话访问 `/admin/api/settings` 得 401；
+④ *首次初始化*：纯 HTTP 创建管理员 + 配上游 → 201 + `tcg_sess` Cookie、响应不含上游明文 key、再次 setup 409、`/admin` 变控制台；
+⑤ *重启*：新容器复用数据卷，`setupRequired:false` / `upstreamConfigured:true`，旧 Cookie 401（会话只在内存）。
+
+镜像：`ghcr.io/kaoqy/tool-calls-gateway:v1.3.0`（含 `1.3.0` / `1.3` / `latest` / `sha-2adc8bc`），多架构 `linux/amd64` + `linux/arm64`，digest `sha256:5e57930d…`。
 ## 5. 未验证项汇总
 
 | 项 | 状态 | 原因 | 复现命令 |
@@ -634,6 +643,6 @@ docker run -d --name toolcall-gateway -p 8787:8787 \
 | `v1.1.0` | `d2e37c5` | `43678360516` ⚠️ smoke 失败 | `sha256:f1b98ae8…` | 应用内设置初版。已知问题：Docker 端口映射下 `/admin` 返回 401（仅回环策略），**用 v1.1.1** |
 | `v1.1.1` | `9487663` | `43678695307` ✅ | `sha256:d1a377d6…` | 修复上述问题：`ADMIN_TOKEN` 登录 + HttpOnly Cookie；CI 冒烟覆盖 401/200 与 `deploy.sh` 语法 |
 | `v1.2.0` | `19d4339` | `43683536879` ✅ | `sha256:4eaa009e…` | 设置页 UI 重构（侧边栏/脏状态/模型表/接入信息）+ `test/ui.test.mjs` 回归防线；README 部署章节重写 |
-| `v1.3.0` | 待填 | 待填 | 待填 | **零配置部署**：去掉全部必需 env，首次访问 /admin 创建管理员 + 配上游；新增 `src/auth.mjs`（scrypt/会话/节流）+ 初始化向导 + 账号分区；未配上游时 /v1 明确 503 |
+| `v1.3.0` | `2adc8bc` | `43687684159` ✅ | `sha256:5e57930d…` | **零配置部署**：去掉全部必需 env，首次访问 /admin 创建管理员 + 配上游；新增 `src/auth.mjs`（scrypt/会话/节流）+ 初始化向导 + 账号分区；未配上游时 /v1 明确 503 |
 
 镜像：`ghcr.io/kaoqy/tool-calls-gateway:{v1.1.1,1.1.1,1.1,latest,sha-*}`，平台 `linux/amd64` + `linux/arm64`。
