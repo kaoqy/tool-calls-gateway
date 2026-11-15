@@ -18,6 +18,52 @@
 //   stream_reasoning 流式：先 reasoning_content 分片，再正文工具块
 //   weird_sse       故意不规范的 SSE（无空格 data:、事件跨多行、小写 [done]、注释行）
 import http from 'node:http';
+import crypto from 'node:crypto';
+
+/**
+ * 把收到的 messages 里 content 的"形状"记下来（供 /__diag 断言多模态透传）。
+ * 只记录结构 + sha256，不记录内容本身——这样既能断言"base64 逐字节未变"，又不会把大块 base64 塞进诊断。
+ */
+function contentShapes(body) {
+  const shapes = [];
+  for (const m of Array.isArray(body?.messages) ? body.messages : []) {
+    const c = m?.content;
+    if (typeof c === 'string') {
+      shapes.push({ role: m?.role ?? null, kind: 'string', textLen: c.length, text: c.length <= 200 ? c : undefined });
+      continue;
+    }
+    if (Array.isArray(c)) {
+      shapes.push({
+        role: m?.role ?? null,
+        kind: 'array',
+        parts: c.map((p) => {
+          if (typeof p === 'string') return { type: 'string', textLen: p.length };
+          if (!p || typeof p !== 'object') return { type: typeof p };
+          const t = String(p.type ?? 'unknown');
+          if (t === 'image_url' || t === 'input_image' || t === 'file' || t === 'input_audio') {
+            const raw =
+              typeof p.image_url === 'string'
+                ? p.image_url
+                : p.image_url?.url ?? p.image_data ?? p.file?.file_data ?? p.input_audio?.data ?? '';
+            const s = String(raw ?? '');
+            return {
+              type: t,
+              detail: p.image_url?.detail ?? p.detail ?? null,
+              bytes: Buffer.byteLength(s, 'utf8'),
+              sha256: crypto.createHash('sha256').update(s).digest('hex'),
+              filename: p.file?.filename ?? null,
+            };
+          }
+          if (t === 'text') return { type: 'text', textLen: String(p.text ?? '').length, text: String(p.text ?? '').slice(0, 120) };
+          return { type: t };
+        }),
+      });
+      continue;
+    }
+    shapes.push({ role: m?.role ?? null, kind: c === null ? 'null' : typeof c });
+  }
+  return shapes;
+}
 
 const PORT = Number.parseInt(process.env.PORT ?? '0', 10);
 const MODEL = process.env.MOCK_MODEL ?? 'mock-deepseek';
@@ -330,6 +376,7 @@ const server = http.createServer(async (req, res) => {
       messageCount: Array.isArray(body?.messages) ? body.messages.length : 0,
       systemPreview: String(body?.messages?.[0]?.content ?? '').slice(0, 160),
       authPrefix: String(req.headers.authorization ?? '').slice(0, 16),
+      contentShapes: contentShapes(body),
       mode,
     };
     if (mode === 'error') {
@@ -337,6 +384,16 @@ const server = http.createServer(async (req, res) => {
         error: {
           type: status === 429 ? 'rate_limit_exceeded' : 'upstream_internal_error',
           message: `mock upstream 故意返回 ${status}`,
+        },
+      });
+    }
+
+    if (mode === 'vision_unsupported') {
+      // 模拟"模型不接受图片"的上游：400 + 含 image 关键字，用于验证网关的错误归一化
+      return sendJson(res, 400, {
+        error: {
+          type: 'invalid_request_error',
+          message: 'This model does not support image input; content type image_url is not allowed.',
         },
       });
     }

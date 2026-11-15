@@ -17,6 +17,8 @@ export const EDITABLE_FIELDS = Object.freeze({
   gatewayApiKey: { env: 'GATEWAY_API_KEY', label: '下游网关 Key', type: 'secret' },
   toolMode: { env: 'TOOL_MODE', label: '工具模拟模式', type: 'enum', values: ['auto', 'off'] },
   reasoningPassthrough: { env: 'REASONING_PASSTHROUGH', label: '透传 reasoning', type: 'boolean' },
+  // 多模态：pass=原样转发（默认）/ placeholder=占位文本 / reject=含媒体且有 tools 时 400
+  imageMode: { env: 'IMAGE_MODE', label: '图片处理模式', type: 'enum', values: ['pass', 'placeholder', 'reject'] },
   requestTimeoutMs: { env: 'REQUEST_TIMEOUT_MS', label: '上游超时(ms)', type: 'int', min: 1000, max: 600000 },
   maxBodyBytes: { env: 'MAX_BODY_BYTES', label: '请求体上限(B)', type: 'int', min: 1024, max: 67108864 },
 });

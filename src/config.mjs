@@ -3,9 +3,14 @@
 
 const DEFAULT_PORT = 8787;
 const DEFAULT_TIMEOUT_MS = 60000;
-const DEFAULT_MAX_BODY = 2 * 1024 * 1024; // 2MB
+const DEFAULT_MAX_BODY = 16 * 1024 * 1024; // 16MB：多模态 base64 很容易超 2MB
 const DEFAULT_LIVE_MODEL = 'deepseek-web-flash';
 const DEFAULT_MAX_LIVE_CALLS = 40;
+// 多模态保护：单请求图片数上限 / 单 part 上限 / 含媒体时的最小超时
+const DEFAULT_MAX_IMAGES = 8;
+const DEFAULT_MAX_MEDIA_PART_BYTES = 8 * 1024 * 1024;
+const DEFAULT_MEDIA_TIMEOUT_MS = 120000;
+export const IMAGE_MODES = Object.freeze(['pass', 'placeholder', 'reject']);
 
 function toInt(value, fallback) {
   if (value === undefined || value === null || value === '') return fallback;
@@ -71,6 +76,7 @@ export function loadConfig(env = process.env) {
   const toolMode = String(env.TOOL_MODE ?? 'auto').trim().toLowerCase();
   const logLevel = String(env.LOG_LEVEL ?? 'info').trim().toLowerCase();
   const reasoning = String(env.REASONING_PASSTHROUGH ?? 'on').trim().toLowerCase();
+  const imageModeRaw = String(env.IMAGE_MODE ?? 'pass').trim().toLowerCase();
   return Object.freeze({
     port: toInt(env.PORT, DEFAULT_PORT),
     // 零配置部署：默认不指向任何上游，必须在 /admin 首次配置（或显式给 env）
@@ -86,6 +92,12 @@ export function loadConfig(env = process.env) {
     modelOverride: (env.MODEL_OVERRIDE ?? '').trim(),
     gatewayApiKey: (env.GATEWAY_API_KEY ?? '').trim(),
     reasoningPassthrough: !(reasoning === 'off' || reasoning === 'false' || reasoning === '0'),
+    // ---- 第四轮新增：多模态 ----
+    // pass=媒体原样转发上游（默认）；placeholder=媒体换成占位文本；reject=含媒体且有 tools 时 400
+    imageMode: IMAGE_MODES.includes(imageModeRaw) ? imageModeRaw : 'pass',
+    maxImagesPerRequest: toInt(env.MAX_IMAGES_PER_REQUEST, DEFAULT_MAX_IMAGES) || DEFAULT_MAX_IMAGES,
+    maxMediaPartBytes: toInt(env.MAX_MEDIA_PART_BYTES, DEFAULT_MAX_MEDIA_PART_BYTES) || DEFAULT_MAX_MEDIA_PART_BYTES,
+    mediaTimeoutMs: toInt(env.MEDIA_TIMEOUT_MS, DEFAULT_MEDIA_TIMEOUT_MS) || DEFAULT_MEDIA_TIMEOUT_MS,
     liveModel: (env.LIVE_MODEL ?? '').trim() || DEFAULT_LIVE_MODEL,
     maxLiveCalls: toInt(env.MAX_LIVE_CALLS, DEFAULT_MAX_LIVE_CALLS) || DEFAULT_MAX_LIVE_CALLS,
     // ---- 第三轮新增：应用内设置 ----

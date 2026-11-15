@@ -1,4 +1,4 @@
-name: ci-and-publish
+﻿name: ci-and-publish
 
 # 测试 → 构建多架构镜像 → 推送到 GitHub Container Registry (GHCR)
 # 打 tag（如 v1.0.0）时产出 ghcr.io/<owner>/<repo>:v1.0.0
@@ -49,7 +49,7 @@ jobs:
       - name: 单元测试
         run: npm test
 
-      - name: 全量离线 gate（M0~M6 + M8 + M10~M12）
+      - name: 全量离线 gate（M0~M6 + M8 + M10~M12 + M14）
         run: npm run gate
 
       - name: 密钥泄漏扫描（只匹配真实 key 形态，避免误报测试用假值）
@@ -222,8 +222,68 @@ jobs:
           curl -fsS http://127.0.0.1:8787/admin | grep -q '登录'
           docker logs tc-smoke | tail -n 20
 
+      - name: 多模态端到端（容器 + mock 上游：图片必须真的到达上游）
+        run: |
+          set -eu
+          PNG='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYGAAAAAEAAH2FzhVAAAAAElFTkSuQmCC'
+          # 主机上起可控 mock 上游，容器用 host-gateway 访问
+          PORT=18990 node mock/upstream.mjs & MOCK_PID=$!
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18990/healthz >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:18990/healthz
+
+          docker rm -f tc-vision >/dev/null 2>&1 || true
+          docker run -d --name tc-vision -p 8788:8787 \
+            --add-host=host.docker.internal:host-gateway \
+            -v tc-vision-data:/app/data \
+            toolcall-gateway:smoke
+          for i in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:8788/healthz >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8788/healthz | grep -q '"imageMode":"pass"'
+
+          # 初始化（零 env，纯 HTTP）
+          curl -fsS -c /tmp/vision-cookies.txt -X POST http://127.0.0.1:8788/admin/api/setup \
+            -H 'content-type: application/json' \
+            -d '{"username":"admin","password":"vision-test-password","upstreamBaseUrl":"http://host.docker.internal:18990","upstreamApiKey":"sk-mock","defaultModel":"mock-tool"}' \
+            | grep -q '"upstreamBaseUrl"'
+
+          # 带 tools + 图片的请求
+          printf '{"model":"mock-tool","messages":[{"role":"user","content":[{"type":"text","text":"描述这张图"},{"type":"image_url","image_url":{"url":"data:image/png;base64,%s"}}]}],"tools":[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object","properties":{"city":{"type":"string"}}}}}]}' "$PNG" > /tmp/vision.json
+          code=$(curl -s -o /tmp/vision-res.json -w '%{http_code}' -X POST http://127.0.0.1:8788/v1/chat/completions \
+            -H 'content-type: application/json' --data-binary @/tmp/vision.json)
+          echo "vision request -> $code"
+          cat /tmp/vision-res.json | head -c 400; echo
+          test "$code" = "200"
+          grep -q '"finish_reason":"tool_calls"' /tmp/vision-res.json
+
+          # 关键：上游侧确实收到了 image_url，且 base64 未被改写
+          curl -fsS http://127.0.0.1:18990/__diag > /tmp/vision-diag.json
+          export PNG
+          node -e "
+            const fs = require('fs');
+            const crypto = require('crypto');
+            const png = process.env.PNG;
+            const diag = JSON.parse(fs.readFileSync('/tmp/vision-diag.json', 'utf8'));
+            const user = (diag.lastRequest.contentShapes || []).find((x) => x.role === 'user');
+            if (!user || user.kind !== 'array') throw new Error('上游收到的 content 不是数组: ' + JSON.stringify(user));
+            const parts = user.parts.map((p) => p.type);
+            if (parts.join(',') !== 'text,image_url') throw new Error('part 顺序不对: ' + parts);
+            const expected = crypto.createHash('sha256').update('data:image/png;base64,' + png).digest('hex');
+            if (user.parts[1].sha256 !== expected) throw new Error('base64 被改写了');
+            console.log('上游确实收到 image_url，sha256 一致，', user.parts[1].bytes, 'bytes');
+          "
+          kill $MOCK_PID || true
+          docker rm -f tc-vision
+          docker volume rm tc-vision-data || true
+
       - name: 清理
         if: always()
         run: |
-          docker rm -f tc-smoke || true
-          docker volume rm tc-smoke-data || true
+          docker rm -f tc-smoke tc-vision || true
+          docker volume rm tc-smoke-data tc-vision-data || true
+          pkill -f 'mock/upstream.mjs' || true
+

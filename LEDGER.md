@@ -291,6 +291,32 @@
 ⑤ *重启*：新容器复用数据卷，`setupRequired:false` / `upstreamConfigured:true`，旧 Cookie 401（会话只在内存）。
 
 镜像：`ghcr.io/kaoqy/tool-calls-gateway:v1.3.0`（含 `1.3.0` / `1.3` / `latest` / `sha-2adc8bc`），多架构 `linux/amd64` + `linux/arm64`，digest `sha256:5e57930d…`。
+### M14（多模态：图片转发修复，2026-11-15）
+
+**缺陷**（用户已定位，本机复现确认）：
+1. `src/prompt.mjs` 的 `contentToText()` 只取 text part，`image_url`/`input_image`/`file`/`input_audio` 一律返回空串再 `.filter(Boolean)` → 图片静默消失，无日志无计数；
+2. `pushMerged()` 用模板字符串拼 `content`，content 是数组时会变成 `[object Object]`，数组结构被破坏；
+3. `MAX_BODY_BYTES` 默认 2MB，一张图 base64 就超，表现为"图片还是没过去"，极易与缺陷 1 混淆。
+
+**实现**：
+- 新增 `src/content.mjs`：`normalizeContent` / `contentToText` / `countMedia` / `hasMedia`，另有 `describeMediaPart` / `mediaLogLabel` / `mediaSizeStats` / `listMedia` / `countMediaInBody`。纯文本保持 string（不包装成数组），数组保序不合并，未识别 part **fail-open 原样透传** + 计数 + warn（只打 type 名）。
+- `prompt.mjs`：`flattenMessages(messages, { imageMode, logger })` 全面走 `normalizeContent`；`pushMerged` 改为「两边都是 string 才拼字符串，否则拼数组」（数组永不被字符串化）；tool 结果转 user 消息时 `<tool_result>` 文本块与媒体 part 并存；assistant 带媒体时输出数组（文本 → 媒体 → 工具块）。
+- `settings.mjs`：新增 `imageMode`（`pass`/`placeholder`/`reject`），env `IMAGE_MODE`，默认 `pass`，非必填。
+- `config.mjs`：`maxBodyBytes` 默认 2MB → **16MB**；新增 `maxImagesPerRequest=8`、`maxMediaPartBytes=8MB`、`mediaTimeoutMs=120000`。
+- `server.mjs`：`readBody` 边读边计字节 + 超限立即中断（回 413 后再 destroy，不做切片以免破坏 base64）；413 消息带实际大小/上限/调参指引；媒体数量与单 part 体积守卫；含媒体时超时放宽到 `max(配置, 120s)` 并记 `media timeout widened`；上游 400/422 且提到 image/vision/multimodal/content type 时归一化为 `upstream_vision_unsupported`（原文经 `sanitizeUpstreamSnippet` 脱敏后放 `error.upstream`）；`/healthz` 增 `imageMode`、`maxBodyBytes`；新增 `POST /admin/api/test-vision`（内嵌 69 字节 1×1 PNG，不读文件）。
+- `admin-ui.mjs`：网关分区新增「图片处理模式」下拉（三行说明 + 来源徽标），自检分区新增「视觉自检」按钮与结果卡（含 file/PDF 限制提示）。
+- `mock/upstream.mjs`：`/__diag` 的 `lastRequest.contentShapes` 记录每个 message 的 content 形状（string/array/null）与每个媒体 part 的 `type/bytes/sha256`，用于断言"base64 逐字节未变"而不必回显内容；新增 `mock-vision_unsupported` 模式（400 + 提到 image）。
+
+**Gate 结果（真跑）**
+| 项 | 结果 |
+| --- | --- |
+| `node --test test/media.test.mjs` | **26/26**：string→object 且 base64 不变 / detail 保留 / text+image 保序不合并 / 未知 part fail-open+warn / placeholder 回归 / input_image·file·input_audio 原样 / 同角色合并仍是数组（无 `[object Object]`）/ tool 结果保留图片 / 4MB 不 413 / 20MB 413 且非 invalid_json / 9 张图 413 / reject 400 且不打上游 / 上游 400 image → `upstream_vision_unsupported` / 日志不含 base64 / healthz imageMode / 未知类型经网关透传 |
+| `node scripts/e2e_media.mjs` | **15/15**：真起 mock + 网关 → 断言上游收到的 content 是数组、text+image_url 保序、detail 保留、base64 sha256 一致、system 仍是字符串、finish_reason=tool_calls；另含 placeholder/reject/3MB 通过/20MB 413 |
+| `npm test` | **125/125** |
+| `node scripts/gate.mjs` | **PASS (12/13 通过, 1 跳过)**，新增 **M14 PASS**；M9 需 --live |
+| 浏览器实测 | `/admin` 显示「图片处理模式 = pass（来自默认值）」与「视觉自检」按钮，点自检走通（见下方补验） |
+
+**未本机验证**：Docker 侧的多模态端到端（本机无 docker）。改为在 CI 冒烟里真跑：主机起 mock 上游 → 容器用 `--add-host=host.docker.internal:host-gateway` 指向它 → 零 env 初始化 → curl 发带图 + tools 的请求 → 断言 200 / `finish_reason=tool_calls` / 上游 `__diag` 里 content 是数组且 image_url 的 sha256 与发送值一致。
 ## 5. 未验证项汇总
 
 | 项 | 状态 | 原因 | 复现命令 |
@@ -643,6 +669,7 @@ docker run -d --name toolcall-gateway -p 8787:8787 \
 | `v1.1.0` | `d2e37c5` | `43678360516` ⚠️ smoke 失败 | `sha256:f1b98ae8…` | 应用内设置初版。已知问题：Docker 端口映射下 `/admin` 返回 401（仅回环策略），**用 v1.1.1** |
 | `v1.1.1` | `9487663` | `43678695307` ✅ | `sha256:d1a377d6…` | 修复上述问题：`ADMIN_TOKEN` 登录 + HttpOnly Cookie；CI 冒烟覆盖 401/200 与 `deploy.sh` 语法 |
 | `v1.2.0` | `19d4339` | `43683536879` ✅ | `sha256:4eaa009e…` | 设置页 UI 重构（侧边栏/脏状态/模型表/接入信息）+ `test/ui.test.mjs` 回归防线；README 部署章节重写 |
-| `v1.3.0` | `2adc8bc` | `43687684159` ✅ | `sha256:5e57930d…` | **零配置部署**：去掉全部必需 env，首次访问 /admin 创建管理员 + 配上游；新增 `src/auth.mjs`（scrypt/会话/节流）+ 初始化向导 + 账号分区；未配上游时 /v1 明确 503 |
+| `v1.3.0` | `2adc8bc` | `43687684159` ✅ | `sha256:5e57930d…` |
+| `v1.4.0` | 待填 | 待填 | 待填 | **多模态修复**：模拟模式不再丢弃图片；新增 `src/content.mjs`（归一化/计数/fail-open）、`imageMode` 三态、16MB 上限 + 边读边计、媒体超时放宽、`upstream_vision_unsupported` 归一化、视觉自检 | **零配置部署**：去掉全部必需 env，首次访问 /admin 创建管理员 + 配上游；新增 `src/auth.mjs`（scrypt/会话/节流）+ 初始化向导 + 账号分区；未配上游时 /v1 明确 503 |
 
 镜像：`ghcr.io/kaoqy/tool-calls-gateway:{v1.1.1,1.1.1,1.1,latest,sha-*}`，平台 `linux/amd64` + `linux/arm64`。

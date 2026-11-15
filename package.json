@@ -1,6 +1,6 @@
 {
   "name": "toolcall-gateway",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "private": true,
   "description": "OpenAI-compatible gateway that simulates tool calling on top of a plain-chat upstream",
   "type": "module",

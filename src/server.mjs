@@ -38,6 +38,13 @@ import {
   parseModelOutput,
 } from './protocol.mjs';
 import { collectStreamText, encodeSse, SSE_DONE_LINE } from './sse.mjs';
+import {
+  countMediaInBody,
+  hasMedia,
+  listMedia,
+  mediaSizeStats,
+  normalizeContent,
+} from './content.mjs';
 
 /** 发送 JSON 响应 */
 export function sendJson(res, status, obj, headers = {}) {
@@ -63,7 +70,7 @@ export function sendError(res, status, type, message, extra = {}) {
   sendJson(res, status, { error: { type, message, ...extra } });
 }
 
-/** 读取请求体，超出上限抛 code=BODY_TOO_LARGE */
+/** 读取请求体：边读边累加字节，超限立刻中断（不做切片，避免破坏 base64 / JSON） */
 export async function readBody(req, maxBytes) {
   const chunks = [];
   let size = 0;
@@ -72,11 +79,21 @@ export async function readBody(req, maxBytes) {
     if (size > maxBytes) {
       const err = new Error(`请求体超过 ${maxBytes} 字节上限`);
       err.code = 'BODY_TOO_LARGE';
-      throw err;
+      err.size = size;
+      err.limit = maxBytes;
+      throw err; // 停止继续累积，交给调用方回 413 并断开
     }
     chunks.push(chunk);
   }
   return Buffer.concat(chunks);
+}
+
+/** 人类可读的字节数（错误信息用，不涉及内容） */
+export function formatBytes(n) {
+  const num = Number(n) || 0;
+  if (num < 1024) return `${num}B`;
+  if (num < 1024 * 1024) return `${(num / 1024).toFixed(1)}KB`;
+  return `${(num / (1024 * 1024)).toFixed(2)}MB`;
 }
 
 /** 把上游流原样转发给客户端（零缓冲） */
@@ -292,6 +309,9 @@ async function handleRequest(req, res, ctx) {
       status: 'ok',
       setupRequired: setupRequired(rctx),
       upstreamConfigured: Boolean(String(config.upstreamBaseUrl ?? '').trim()),
+      // 图片处理模式：pass（默认，原样转发）/ placeholder（占位文本）/ reject（400）
+      imageMode: config.imageMode ?? 'pass',
+      maxBodyBytes: config.maxBodyBytes,
     });
   }
 
@@ -431,6 +451,7 @@ function adminView(settings, ctx) {
       adminMode: ctx?.config?.adminToken ? 'token-or-account' : 'account',
       tokenEnabled: Boolean(ctx?.config?.adminToken),
       sessions: ctx?.sessions?.size?.() ?? 0,
+      imageMode: ctx?.config?.imageMode ?? 'pass',
     },
   };
 }
@@ -602,7 +623,98 @@ async function handleAdminApi(req, res, url, ctx) {
     }
   }
 
+  if (pathname === '/admin/api/test-vision' && req.method === 'POST') {
+    return handleAdminVisionTest(req, res, ctx);
+  }
+
   return sendError(res, 404, 'not_found', `未知设置接口: ${req.method} ${pathname}`);
+}
+
+/** 1x1 黑色 PNG（69 字节），内嵌常量：自检用，不读文件、不引依赖 */
+export const TINY_PNG_BASE64 =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYGAAAAAEAAH2FzhVAAAAAElFTkSuQmCC';
+
+const VISION_SELF_TEST_TOOLS = [
+  {
+    type: 'function',
+    function: {
+      name: 'describe_image',
+      description: '描述图片内容',
+      parameters: { type: 'object', properties: { summary: { type: 'string' } }, required: ['summary'] },
+    },
+  },
+];
+
+/**
+ * 视觉自检：发一次「1x1 PNG + tools」的真实上游请求，看上游是否接受图片。
+ * 结果里同时提示 file/PDF 的支持情况（网关不会把 PDF 转图片）。
+ */
+async function handleAdminVisionTest(req, res, ctx) {
+  const { config, logger } = ctx;
+  const started = Date.now();
+  const runConfig = {
+    ...config,
+    requestTimeoutMs: Math.max(Number(config.requestTimeoutMs) || 60000, Number(config.mediaTimeoutMs) || 120000),
+  };
+  const body = {
+    model: config.defaultModel || 'deepseek-chat',
+    messages: [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: '这是一张 1x1 的图片，请用一句普通话描述它（可以说明它是纯色）。' },
+          { type: 'image_url', image_url: { url: `data:image/png;base64,${TINY_PNG_BASE64}` } },
+        ],
+      },
+    ],
+    tools: VISION_SELF_TEST_TOOLS,
+    max_tokens: 128,
+  };
+
+  const fileSupport =
+    '未验证：本自检只发 image_url。file/PDF 需要上游明确支持 input_file，很多 OpenAI 兼容上游不支持；网关不会把 PDF 转成图片（零依赖做不了，也不打算引入依赖）。';
+
+  try {
+    const built = buildUpstreamRequest(body, { ...runConfig, logger });
+    const result = await runUpstreamOnce({ config: runConfig, upstreamBody: built.body });
+    const latencyMs = Date.now() - started;
+    const parsed = resolveToolCalls(result);
+    const sent = listMedia(body);
+    logger.info('vision self-test ok', { latencyMs, finish: parsed.finishReason, bytes: sent[0]?.bytes });
+    return sendJson(res, 200, {
+      ok: true,
+      visionAccepted: true,
+      status: 200,
+      latencyMs,
+      model: result.model ?? built.body.model,
+      finishReason: parsed.finishReason,
+      toolCalls: parsed.toolCalls.length,
+      text: String(result.text ?? '').slice(0, 200),
+      mediaSent: sent.map((d) => ({ type: d.type, mime: d.mime, bytes: d.bytes })),
+      fileSupport,
+      note: '本次自检消耗 1 次上游调用',
+    });
+  } catch (err) {
+    const latencyMs = Date.now() - started;
+    if (err?.upstreamStatus) {
+      const vision = isVisionRejection(err.upstreamStatus, err.upstreamText);
+      logger.warn('vision self-test rejected', { status: err.upstreamStatus, vision, latencyMs });
+      return sendJson(res, 200, {
+        ok: false,
+        visionAccepted: !vision,
+        status: err.upstreamStatus,
+        errorType: vision ? 'upstream_vision_unsupported' : 'upstream_error',
+        latencyMs,
+        message: vision
+          ? '上游似乎不接受图片输入：把它设成默认模型时，请把 imageMode 调成 placeholder，或换支持视觉的上游模型。'
+          : `上游返回 HTTP ${err.upstreamStatus}`,
+        upstream: sanitizeUpstreamSnippet(err.upstreamText),
+        fileSupport,
+        note: '本次自检消耗 1 次上游调用',
+      });
+    }
+    return sendSettingsError(res, err);
+  }
 }
 
 async function handleModels(res, config, logger) {
@@ -626,9 +738,23 @@ async function handleChatCompletions(req, res, config, logger) {
     raw = await readBody(req, config.maxBodyBytes);
   } catch (err) {
     if (err.code === 'BODY_TOO_LARGE') {
-      sendError(res, 413, 'payload_too_large', `请求体超过 ${config.maxBodyBytes} 字节上限`);
-      req.resume(); // 丢弃剩余数据，但不粗暴断开连接
-      return;
+      // 已停止读取：回完 413 再断开，避免客户端把剩余几百 MB 继续灌进来
+      res.setHeader('connection', 'close');
+      res.once('finish', () => {
+        try {
+          req.destroy();
+        } catch {
+          /* ignore */
+        }
+      });
+      return sendError(
+        res,
+        413,
+        'payload_too_large',
+        `请求体过大：读取到 ${formatBytes(err.size)} 时已超过上限 ${formatBytes(err.limit)}。` +
+          `可在 /admin「网关」分区调大 maxBodyBytes（多模态图片按 base64 体积计算）。`,
+        { size: err.size, limit: err.limit },
+      );
     }
     throw err;
   }
@@ -646,7 +772,37 @@ async function handleChatCompletions(req, res, config, logger) {
     return sendError(res, 400, 'invalid_request_error', '缺少 messages 数组');
   }
 
+  // 内存保护：图片数量 / 单 part 体积超限直接拒绝，避免 base64 撑爆进程
+  const mediaCounts = countMediaInBody(body);
+  const mediaSizes = mediaSizeStats(body);
+  const maxImages = config.maxImagesPerRequest ?? 8;
+  const maxPartBytes = config.maxMediaPartBytes ?? 8 * 1024 * 1024;
+  if (mediaCounts.images > maxImages) {
+    logger.warn('media guard: too many images', { images: mediaCounts.images, limit: maxImages });
+    return sendError(res, 413, 'payload_too_large', `单次请求图片过多（${mediaCounts.images} 张，上限 ${maxImages} 张）`, {
+      images: mediaCounts.images,
+      limit: maxImages,
+    });
+  }
+  if (mediaSizes.maxPartBytes > maxPartBytes) {
+    logger.warn('media guard: media part too large', { bytes: mediaSizes.maxPartBytes, limit: maxPartBytes });
+    return sendError(
+      res,
+      413,
+      'payload_too_large',
+      `单个媒体 part 过大（${formatBytes(mediaSizes.maxPartBytes)}，上限 ${formatBytes(maxPartBytes)}）`,
+      { bytes: mediaSizes.maxPartBytes, limit: maxPartBytes },
+    );
+  }
+
   const simulate = config.toolMode !== 'off' && hasTools(body);
+  if (simulate && config.imageMode === 'reject' && hasMedia(body)) {
+    logger.warn('imageMode=reject blocked a media request', mediaCounts);
+    return sendError(res, 400, 'vision_unsupported', '当前 imageMode=reject，已拒绝含媒体的请求', {
+      imageMode: 'reject',
+      media: mediaCounts,
+    });
+  }
   if (simulate) {
     return handleSimulated(req, res, config, logger, body, raw);
   }
@@ -847,8 +1003,62 @@ function resolveToolCalls(result) {
   return { ...parseModelOutput(result.text), native: false };
 }
 
+/** 判定上游的错误是否属于"不接受图片/多模态" */
+function isVisionRejection(status, text) {
+  if (status !== 400 && status !== 422) return false;
+  const s = String(text ?? '');
+  return /image|vision|multimodal|multi-modal|content[-_ ]?type|unsupported.*(content|part)/i.test(s);
+}
+
+/** 上游错误体脱敏：去掉 data URL / base64 长串 / key，再截断 */
+export function sanitizeUpstreamSnippet(text, max = 500) {
+  let s = String(text ?? '');
+  s = s.replace(/data:[^\s"']{40,}/gi, '<inline data URL>');
+  s = s.replace(/sk-[A-Za-z0-9_-]{8,}/g, 'sk-***');
+  s = s.replace(/[A-Za-z0-9+/]{200,}={0,2}/g, (m) => `<base64 ${m.length} chars>`);
+  return s.length > max ? `${s.slice(0, max)}…` : s;
+}
+
 async function handleSimulated(req, res, config, logger, body) {
-  const built = buildUpstreamRequest(body, config);
+  const mediaCounts = countMediaInBody(body);
+  const withMedia = mediaCounts.images + mediaCounts.files + mediaCounts.audios > 0;
+  if (config.logLevel === 'debug' || mediaCounts.unknownParts) {
+    logger.debug('media parts', { parts: listMedia(body, { limit: 8 }) });
+  }
+  logger.info('media forwarded', {
+    images: mediaCounts.images,
+    files: mediaCounts.files,
+    audios: mediaCounts.audios,
+    unknownParts: mediaCounts.unknownParts,
+    mode: config.imageMode,
+    parts: listMedia(body, { limit: 6 }).map((d) => ({
+      type: d.type,
+      mime: d.mime || undefined,
+      bytes: d.bytes || undefined,
+      urlKind: d.urlKind,
+      host: d.host || undefined,
+    })),
+  });
+
+  // 含媒体的请求放宽超时（视觉推理更慢），并记录放宽原因
+  const runConfig = withMedia
+    ? {
+        ...config,
+        requestTimeoutMs: Math.max(
+          Number(config.requestTimeoutMs) || 60000,
+          Number(config.mediaTimeoutMs) || 120000,
+        ),
+      }
+    : config;
+  if (withMedia && runConfig.requestTimeoutMs !== config.requestTimeoutMs) {
+    logger.info('media timeout widened', {
+      from: config.requestTimeoutMs,
+      to: runConfig.requestTimeoutMs,
+      reason: 'request contains media parts',
+    });
+  }
+
+  const built = buildUpstreamRequest(body, { ...runConfig, logger });
   const upstreamBody = built.body;
   const wantStream = body?.stream === true;
   const includeUsage = body?.stream_options?.include_usage === true;
@@ -866,7 +1076,7 @@ async function handleSimulated(req, res, config, logger, body) {
 
   try {
     if (!wantStream) {
-      let result = await runUpstreamOnce({ config, upstreamBody });
+      let result = await runUpstreamOnce({ config: runConfig, upstreamBody });
       let parsed = resolveToolCalls(result);
 
       // tool_choice 要求调用但模型没给 → 带强化指令重试一次
@@ -874,7 +1084,7 @@ async function handleSimulated(req, res, config, logger, body) {
         logger.warn('tool_choice requires a tool call but model returned text, retrying once', {
           finishReason: parsed.finishReason,
         });
-        result = await runUpstreamOnce({ config, upstreamBody: withRetryHint(upstreamBody) });
+        result = await runUpstreamOnce({ config: runConfig, upstreamBody: withRetryHint(upstreamBody) });
         parsed = resolveToolCalls(result);
       }
 
@@ -898,13 +1108,13 @@ async function handleSimulated(req, res, config, logger, body) {
     }
 
     // buffer-then-synthesize：先把上游整段流读完，再判定并合成 SSE
-    let result = await runUpstreamOnce({ config, upstreamBody });
+    let result = await runUpstreamOnce({ config: runConfig, upstreamBody });
     let parsed = resolveToolCalls(result);
     if (parsed.toolCalls.length === 0 && toolChoiceRequiresTools(body?.tool_choice)) {
       logger.warn('stream: tool_choice requires a tool call but model returned text, retrying once', {
         finishReason: parsed.finishReason,
       });
-      result = await runUpstreamOnce({ config, upstreamBody: withRetryHint(upstreamBody) });
+      result = await runUpstreamOnce({ config: runConfig, upstreamBody: withRetryHint(upstreamBody) });
       parsed = resolveToolCalls(result);
     }
     if (parsed.failed > 0) {
@@ -936,6 +1146,26 @@ async function handleSimulated(req, res, config, logger, body) {
     });
   } catch (err) {
     if (err?.upstreamStatus) {
+      const sentMedia = mediaCounts.images + mediaCounts.files > 0;
+      if (sentMedia && isVisionRejection(err.upstreamStatus, err.upstreamText)) {
+        logger.warn('upstream rejected media input', {
+          status: err.upstreamStatus,
+          images: mediaCounts.images,
+          files: mediaCounts.files,
+          mode: config.imageMode,
+        });
+        return sendError(
+          res,
+          err.upstreamStatus,
+          'upstream_vision_unsupported',
+          '上游模型可能不支持图片输入。可在 /admin 把 imageMode 改为 placeholder（媒体转占位文本后重试），或换一个支持视觉的上游模型。',
+          {
+            upstreamStatus: err.upstreamStatus,
+            upstream: sanitizeUpstreamSnippet(err.upstreamText),
+            imageMode: config.imageMode,
+          },
+        );
+      }
       res.writeHead(err.upstreamStatus, { 'content-type': 'application/json; charset=utf-8' });
       res.end(err.upstreamText ?? '');
       return;

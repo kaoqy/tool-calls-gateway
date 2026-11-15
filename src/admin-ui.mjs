@@ -556,6 +556,23 @@ export function renderAdminHtml({ version = '', username = '' } = {}) {
         </div>
 
         <div class="field">
+          <div class="flabel"><label for="imageMode">图片处理模式</label><span class="chip sm" id="b-imageMode"></span></div>
+          <div class="control">
+            <select id="imageMode">
+              <option value="pass">pass — 图片/文件/音频原样转发给上游（推荐）</option>
+              <option value="placeholder">placeholder — 媒体换成 [图片] 等占位文本</option>
+              <option value="reject">reject — 含媒体的请求直接 400</option>
+            </select>
+          </div>
+          <p class="hint">
+            <code>pass</code>：把客户端发来的 <code>image_url</code> / <code>input_image</code> / <code>file</code> / <code>input_audio</code> 原样转给上游，图片内容不被改写。<br>
+            <code>placeholder</code>：老行为，媒体替换成 <code>[图片]</code> / <code>[文件: name]</code> 文本——上游明确不支持视觉时用，至少不报错。<br>
+            <code>reject</code>：模拟模式下遇到媒体直接返回 <code>400 vision_unsupported</code>，用来尽早暴露问题。
+          </p>
+          <p class="hint">只影响「带 tools 的模拟模式」。不带 tools 的纯聊天请求一直是字节级透传，图片本来就能过。</p>
+        </div>
+
+        <div class="field">
           <div class="flabel"><label for="reasoningPassthrough">透传 reasoning</label><span class="chip sm" id="b-reasoningPassthrough"></span></div>
           <div class="control">
             <select id="reasoningPassthrough">
@@ -569,13 +586,13 @@ export function renderAdminHtml({ version = '', username = '' } = {}) {
         <div class="field">
           <div class="flabel"><label for="requestTimeoutMs">上游超时</label><span class="chip sm" id="b-requestTimeoutMs"></span></div>
           <div class="control"><input id="requestTimeoutMs" type="number" min="1000" max="600000" step="1000"></div>
-          <p class="hint">毫秒。含工具时是「整段流读完」的总预算。</p>
+          <p class="hint">毫秒。含工具时是「整段流读完」的总预算；含媒体的请求会自动放宽到至少 120000ms。</p>
         </div>
 
         <div class="field">
           <div class="flabel"><label for="maxBodyBytes">请求体上限</label><span class="chip sm" id="b-maxBodyBytes"></span></div>
           <div class="control"><input id="maxBodyBytes" type="number" min="1024" max="67108864" step="1024"></div>
-          <p class="hint">字节。超出返回 <code>413 payload_too_large</code>。</p>
+          <p class="hint">字节，默认 16MB。多模态图片按 base64 体积算，一张 1024×1024 PNG 约 1~3MB；超出返回 <code>413 payload_too_large</code>。</p>
         </div>
       </div>
     </section>
@@ -589,6 +606,13 @@ export function renderAdminHtml({ version = '', username = '' } = {}) {
         </div>
         <p class="hint" style="margin-top:10px">发送一条带 <code>get_time</code> 工具的请求，看模型是否会按提示词输出 <code>&lt;tool_call&gt;</code>。上游 <code>supports_tool_call:false</code> 时，命中就说明提示词模拟有效。</p>
         <div id="tool-box"></div>
+
+        <div class="row" style="margin-top:18px">
+          <button class="btn" id="btn-vision">跑一次视觉自检</button>
+          <span class="chip warn"><span class="dot"></span>会消耗 1 次上游调用</span>
+        </div>
+        <p class="hint" style="margin-top:10px">发一张内嵌的 1×1 PNG（69 字节，不读文件）+ <code>tools</code>，确认上游到底吃不吃图片。若报 <code>upstream_vision_unsupported</code>，把 <b>图片处理模式</b> 改成 <code>placeholder</code> 或换支持视觉的模型。</p>
+        <div id="vision-box"></div>
       </div>
     </section>
 
@@ -645,7 +669,7 @@ export function renderAdminHtml({ version = '', username = '' } = {}) {
 (function () {
   'use strict';
   var $ = function (id) { return document.getElementById(id); };
-  var FIELDS = ['upstreamBaseUrl','defaultModel','modelOverride','requestTimeoutMs','maxBodyBytes','toolMode','reasoningPassthrough'];
+  var FIELDS = ['upstreamBaseUrl','defaultModel','modelOverride','requestTimeoutMs','maxBodyBytes','toolMode','reasoningPassthrough','imageMode'];
   var SECRETS = ['upstreamApiKey','gatewayApiKey'];
   var snapshot = '';
   var loaded = null;
@@ -748,6 +772,34 @@ export function renderAdminHtml({ version = '', username = '' } = {}) {
       '</div>';
   }
 
+  function renderVisionResult(data) {
+    var box = $('vision-box');
+    var ok = data.ok === true;
+    var rejected = data.visionAccepted === false;
+    var cls = ok ? 'ok' : rejected ? 'warn' : 'err';
+    var headline = ok ? '上游接受了图片' : rejected ? '上游不接受图片（vision_unsupported）' : '自检失败';
+    var esc = function (s) { return String(s == null ? '' : s).replace(/</g, '&lt;'); };
+    var lines = [];
+    lines.push('<div class="mono">status = ' + (data.status == null ? '—' : data.status) + ' · ' + (data.latencyMs || 0) + 'ms</div>');
+    if (ok) {
+      lines.push('<div class="mono">finish_reason = ' + esc(data.finishReason) + ' · tool_calls = ' + (data.toolCalls || 0) + '</div>');
+      if (data.text) lines.push('<div class="muted">回答片段：' + esc(String(data.text).slice(0, 160)) + '</div>');
+      if (data.mediaSent && data.mediaSent.length) {
+        lines.push('<div class="muted">发送：' + data.mediaSent.map(function (m) { return m.type + ' ' + (m.mime || '') + ' ' + m.bytes + 'B'; }).join('、') + '</div>');
+      }
+    } else {
+      if (data.message) lines.push('<div class="mono">' + esc(data.message) + '</div>');
+      if (data.upstream) lines.push('<div class="mono">上游原文：' + esc(data.upstream) + '</div>');
+    }
+    if (data.fileSupport) lines.push('<div class="muted" style="margin-top:6px">' + esc(data.fileSupport) + '</div>');
+    box.innerHTML =
+      '<div class="result">' +
+        '<div class="headline"><span class="chip ' + cls + '"><span class="dot"></span>' + headline + '</span></div>' +
+        lines.join('') +
+        '<div class="muted">' + esc(data.note || '') + '</div>' +
+      '</div>';
+  }
+
   function applyView(data) {
     loaded = data;
     var s = data.settings;
@@ -757,6 +809,7 @@ export function renderAdminHtml({ version = '', username = '' } = {}) {
       el.value = s[f] === null || s[f] === undefined ? '' : String(s[f]);
     });
     $('reasoningPassthrough').value = s.reasoningPassthrough ? 'on' : 'off';
+    $('imageMode').value = s.imageMode || 'pass';
     $('modelMap').value = Object.keys(s.modelMap || {}).length ? JSON.stringify(s.modelMap, null, 2) : '';
     $('upstreamApiKey').value = '';
     $('gatewayApiKey').value = '';
@@ -834,6 +887,7 @@ export function renderAdminHtml({ version = '', username = '' } = {}) {
       modelMap: $('modelMap').value.trim(),
       toolMode: $('toolMode').value,
       reasoningPassthrough: $('reasoningPassthrough').value,
+      imageMode: $('imageMode').value,
       requestTimeoutMs: Number($('requestTimeoutMs').value || 0),
       maxBodyBytes: Number($('maxBodyBytes').value || 0),
     };
@@ -878,6 +932,15 @@ export function renderAdminHtml({ version = '', username = '' } = {}) {
     var data = await api('/admin/api/test-tool', { method: 'POST', body: {} });
     renderToolResult(data);
     toast(data.finishReason === 'tool_calls' ? '自检命中工具调用' : '自检完成：未命中工具调用', data.finishReason === 'tool_calls' ? 'ok' : 'warn');
+  });
+
+  $('btn-vision').onclick = withBusy($('btn-vision'), async function () {
+    if (!confirm('会真实调用一次上游模型（可能计费），继续？')) return;
+    var data = await api('/admin/api/test-vision', { method: 'POST', body: {} });
+    renderVisionResult(data);
+    if (data.ok) toast('视觉自检通过：上游接受了图片', 'ok');
+    else if (data.visionAccepted === false) toast('上游似乎不支持图片输入', 'warn');
+    else toast('视觉自检失败：' + (data.message || data.errorType || ''), 'err');
   });
 
   $('btn-save').onclick = withBusy($('btn-save'), async function () {

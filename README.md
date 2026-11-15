@@ -1,25 +1,26 @@
 # toolcall-gateway
 
 [![ci-and-publish](https://github.com/kaoqy/tool-calls-gateway/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/kaoqy/tool-calls-gateway/actions/workflows/docker-publish.yml)
-[![ghcr](https://img.shields.io/badge/ghcr.io-toolcall--gateway%3Av1.3.0-blue)](https://github.com/kaoqy/tool-calls-gateway/pkgs/container/toolcall-gateway)
+[![ghcr](https://img.shields.io/badge/ghcr.io-toolcall--gateway%3Av1.4.0-blue)](https://github.com/kaoqy/tool-calls-gateway/pkgs/container/toolcall-gateway)
 
 > **OpenAI 兼容 · 工具调用模拟** 轻量中转网关。
 > 让「只支持纯聊天」的上游模型（如 DeepSeek 纯聊天接口）在不改造下游 Agent / SDK / 客户端的前提下，**变相支持 tool_calls**。
 
 - 运行时：Node.js 20+（ESM，`.mjs`），**零运行时依赖**（只用 `node:` 内置模块 + 全局 `fetch`），无构建步骤。
 - 部署：单镜像 `node:20-alpine`，非 root（`USER node`），带 `HEALTHCHECK`；**零配置**——不填任何环境变量，起容器后在 `/admin` 网页里完成初始化。
+- 多模态：带 `tools` 的请求也会把图片/文件/音频**原样转发**上游（v1.4.0 起；旧版会静默丢弃图片），见 [🖼 多模态](#-多模态图片--文件--音频)。
 - 无状态：网关不保存任何会话，见 [协议假设](#协议的硬性假设)。
 
 ## 🚀 部署（零配置）
 
-> 已发布镜像：**`ghcr.io/kaoqy/tool-calls-gateway:v1.3.0`**（`linux/amd64` + `linux/arm64`，push tag 时由 GitHub Actions 自动构建推送）
+> 已发布镜像：**`ghcr.io/kaoqy/tool-calls-gateway:v1.4.0`**（`linux/amd64` + `linux/arm64`，push tag 时由 GitHub Actions 自动构建推送）
 
 **不需要任何环境变量**：不填上游、不填密钥、不用准备 `.env`。把容器起来，打开网页，第一次访问时创建管理员账号 + 填上游，保存即生效。
 
 ```bash
 docker run -d --name toolcall-gateway -p 8787:8787 \
   -v tcg-data:/app/data --restart unless-stopped \
-  ghcr.io/kaoqy/tool-calls-gateway:v1.3.0
+  ghcr.io/kaoqy/tool-calls-gateway:v1.4.0
 ```
 
 然后浏览器打开 **`http://<host>:8787/admin`** —— 这就是全部初始化。
@@ -51,7 +52,7 @@ docker run -d --name toolcall-gateway \
   -p 8787:8787 \
   -v tcg-data:/app/data \
   --restart unless-stopped \
-  ghcr.io/kaoqy/tool-calls-gateway:v1.3.0
+  ghcr.io/kaoqy/tool-calls-gateway:v1.4.0
 
 docker logs toolcall-gateway | tail -5     # 未初始化时日志会提示去 /admin
 curl -s localhost:8787/healthz             # {"status":"ok","setupRequired":true,...}
@@ -155,6 +156,62 @@ docker run --rm -v tcg-data:/data -v "$PWD":/out alpine tar czf /out/tcg-backup.
 
 > 安全提示：设置页能改上游地址，等价于一个"代理配置"入口。初始化完成后它就受账号保护；要在公网暴露时，优先放在带鉴权的反代之后，或先设 `ADMIN_TOKEN` 再开放端口。
 
+## 🖼 多模态（图片 / 文件 / 音频）
+
+> **先说清楚边界**：不带 `tools` 的普通聊天请求，网关一直是**字节级透传**——请求体原样发给上游，图片本来就能过去，这次没有改它。
+> 本次修的是**模拟模式**（带 `tools`/`functions`）下的静默丢弃：旧实现里 `contentToText()` 只取 `text` part，图片被默默扔掉且没有任何日志。
+
+### 模拟模式下每个 part 的处理方式
+
+| 客户端发来的 part | 网关动作 |
+| --- | --- |
+| `{type:'text', text}` | 原样保留（不合并、不重排；空串也保留） |
+| `{type:'image_url', image_url:'data:...'}` | 规范成 `{type:"image_url", image_url:{url}}`，base64 逐字节不变 |
+| `{type:'image_url', image_url:{url, detail}}` | 原样保留 `url` 与 `detail` |
+| `{type:'input_image', image_url|image_data}` | 原样保留（部分上游用这个变体） |
+| `{type:'file', file:{filename, file_data|file_id}}` | 原样保留（data URL 前缀不动） |
+| `{type:'input_audio', input_audio:{data, format}}` | 原样保留 |
+| 未识别的类型（如 `video`） | **fail-open 原样透传** + 计数 + `warn`（只打 type 名，不打内容） |
+
+同角色连续两条多模态消息合并时，`content` 保持**数组**（不会再被拼成字符串、出现 `[object Object]`）；
+`role:"tool"` 的结果转成 user 消息时，`<tool_result>` 文本块与媒体 part 一起保留。
+
+### imageMode 三态
+
+在 `/admin` →「网关」→「图片处理模式」里改（有 `来自 env / UI 已覆盖 / 默认值` 徽标），也可以用环境变量 `IMAGE_MODE` 给默认值：
+
+| 值 | 行为 | 什么时候用 |
+| --- | --- | --- |
+| `pass`（默认） | 图片/文件/音频原样转发上游 | 上游支持视觉，或你希望自己兜住上游报错 |
+| `placeholder` | 媒体替换成 `[图片]` / `[文件: name]` / `[音频]` 占位文本 | 上游明确不支持视觉，只想让它别报错 |
+| `reject` | 模拟模式下遇到媒体直接 `400 vision_unsupported` | 想尽早暴露"客户端在发图但上游看不了" |
+
+### 体积与超时
+
+- 请求体上限默认 **16MB**（原来是 2MB，一张图 base64 就能超；base64 体积 ≈ 原图 × 1.37）。
+- 边读边累加字节、超限立刻中断：返回 `413 payload_too_large`，错误里带**实际大小**、**上限**和"可在 /admin「网关」分区调大 maxBodyBytes"。
+- 单请求图片数 > 8 或单个 part > 8MB → 同样 413（防 OOM），不硬扛。
+- 含媒体的请求自动把超时放宽到 `max(配置值, 120000ms)`，日志里注明 `media timeout widened`。
+
+### 上游不支持视觉时
+
+上游返回 `400/422` 且错误体提到 image / vision / multimodal / content type 时，网关把错误归一化成：
+
+```json
+{ "error": { "type": "upstream_vision_unsupported",
+             "message": "上游模型可能不支持图片输入。可在 /admin 把 imageMode 改为 placeholder（媒体转占位文本后重试），或换一个支持视觉的上游模型。",
+             "upstreamStatus": 400,
+             "upstream": "…（脱敏后的上游原文，最多 500 字）" } }
+```
+
+`/admin` →「自检」→ **视觉自检** 可以直接验：发一张内嵌的 1×1 PNG（69 字节，不读文件）+ `tools`，报告上游是否接受、延迟、以及 file/PDF 的已知限制（网关不会把 PDF 转图片，也不打算为此引入依赖）。
+
+### 日志纪律
+
+每条模拟请求记一条 info：`media forwarded images=… files=… audios=… unknownParts=… mode=… parts=[{type,mime,bytes,urlKind,host}]`。
+**绝不打印 base64 内容**：data URL 只显示 `<inline data URL, N bytes> <mime>`，http(s) 只显示 host；未识别 part 只显示 type 名。
+
+---
 ## 1. 它解决什么问题
 
 ```
@@ -221,12 +278,16 @@ docker compose down
 | `DEFAULT_MODEL` | 空 | 请求未带 `model` 时使用 |
 | `TOOL_MODE` | `auto` | `auto`=含 tools 时模拟；`off`=完全透传（不模拟，上游会因 tools 报错，仅用于排查） |
 | `REQUEST_TIMEOUT_MS` | `60000` | 单次上游请求总超时（含流式），超时返回 `504 upstream_timeout` |
-| `MAX_BODY_BYTES` | `2097152`（2MB） | 入站请求体上限，超出返回 `413 payload_too_large` |
+| `MAX_BODY_BYTES` | `16777216`（16MB） | 入站请求体上限，超出返回 `413 payload_too_large`。多模态图片按 base64 体积算，边读边计字节、超限立刻中断 |
 | `LOG_LEVEL` | `info` | `debug` 会打印注入后的上游 prompt（密钥仍被脱敏） |
 | `MODEL_MAP` | 空 | 客户端模型名 → 真实上游模型。支持 JSON `{"gpt-5-codex":"deepseek-web-flash"}` 或 `gpt-5-codex:deepseek-web-flash,gpt-4o:deepseek-web-flash` |
 | `MODEL_OVERRIDE` | 空 | **硬覆盖**：任何请求都改写成这个上游模型（优先级最高） |
 | `GATEWAY_API_KEY` | 空 | 设置后校验下游 `Authorization: Bearer <key>`；发往上游时始终改用 `UPSTREAM_API_KEY`（客户端 key 不外泄） |
 | `REASONING_PASSTHROUGH` | `on` | `on` 时把上游 `reasoning_content`/`reasoning` 原样挂在响应 message（及流式 `delta.reasoning_content`）上，**不并入 content** |
+| `IMAGE_MODE` | `pass` | 多模态处理：`pass` 原样转发 / `placeholder` 占位文本 / `reject` 含媒体直接 400 |
+| `MAX_IMAGES_PER_REQUEST` | `8` | 单请求图片数上限（超出 413，防 OOM） |
+| `MAX_MEDIA_PART_BYTES` | `8388608`（8MB） | 单个媒体 part 上限（超出 413） |
+| `MEDIA_TIMEOUT_MS` | `120000` | 含媒体请求的最小上游超时（取与 `REQUEST_TIMEOUT_MS` 的较大值） |
 | `ADMIN_TOKEN` | 空 | 可选的管理令牌（自动化 / 忘记密码时兜底），用 `Authorization: Bearer <ADMIN_TOKEN>` 直接访问 `/admin` |
 | `DATA_DIR` | `data` | 数据目录：`auth.json`（管理员）+ `settings.json`（配置），均 0600。容器内务必挂 volume |
 | `SETTINGS_FILE` / `AUTH_FILE` | 空 | 直接指定文件完整路径，优先级高于 `DATA_DIR` |
@@ -238,7 +299,7 @@ docker compose down
 
 | 方法 | 路径 | 行为 |
 | --- | --- | --- |
-| GET | `/healthz` | `{"status":"ok","setupRequired":<bool>,"upstreamConfigured":<bool>}`（HEALTHCHECK 用） |
+| GET | `/healthz` | `{"status":"ok","setupRequired":<bool>,"upstreamConfigured":<bool>,"imageMode":"pass","maxBodyBytes":16777216}`（HEALTHCHECK / 部署自检用） |
 | GET | `/v1/models` | 透传上游（未配上游时 503） |
 | POST | `/v1/chat/completions` | 含 `tools`/`functions` → 模拟；否则透传（未配上游时 503） |
 | GET | `/admin` | 初始化向导 / 登录页 / 控制台（HTML，单文件无外部资源） |
@@ -253,6 +314,7 @@ docker compose down
 | POST | `/admin/api/settings/reset` | 清除全部 UI 覆盖项，回落 env/默认值 |
 | POST | `/admin/api/test` | 用候选配置测试上游 `GET /models`（不保存） |
 | POST | `/admin/api/test-tool` | 用当前配置跑一次工具模拟自检（消耗 1 次上游调用） |
+| POST | `/admin/api/test-vision` | 视觉自检：发一张内嵌 1×1 PNG + tools，报告上游是否接受图片（消耗 1 次上游调用） |
 
 `/admin*` 的鉴权：初始化窗口内（账号不存在）只有 `setup` / `setup/test` / `session` / `GET /admin` 可用；创建账号后除 `login` / `session` 外都需要登录会话（或 `ADMIN_TOKEN`）。
 
@@ -628,13 +690,13 @@ toolcall-gateway/
 | --- | --- |
 | `pull_request` | 只跑测试（Node 20/22 矩阵、`npm test`、`npm run gate`、密钥扫描），不推镜像 |
 | push 到 `main` | 测试 → 构建并推送 `ghcr.io/<owner>/<repo>:latest` 与 `sha-xxxxxxx` → 镜像冒烟（**零环境变量起容器** → 走完首次初始化 → 重启验持久化） |
-| push tag `v1.3.0` | 同上，并额外推送 `:v1.3.0`、`:1.3` |
+| push tag `v1.4.0` | 同上，并额外推送 `:v1.4.0`、`:1.4` |
 
-发布一个版本（本项目当前版本即 `v1.3.0`）：
+发布一个版本（本项目当前版本即 `v1.4.0`）：
 
 ```bash
-git tag v1.3.0
-git push origin v1.3.0     # 触发构建，产出 ghcr.io/<owner>/<repo>:v1.3.0
+git tag v1.4.0
+git push origin v1.4.0     # 触发构建，产出 ghcr.io/<owner>/<repo>:v1.4.0
 ```
 
 镜像为多架构（`linux/amd64` + `linux/arm64`），带 SBOM 与 provenance。GHCR 使用内置 `GITHUB_TOKEN`（`packages: write`），无需额外 secret。

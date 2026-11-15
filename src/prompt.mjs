@@ -2,6 +2,11 @@
 // 导出纯函数 buildUpstreamRequest(openaiBody, cfg) -> { url, headers, body, simulated }
 import { config as defaultConfig, resolveModel } from './config.mjs';
 import { upstreamHeaders, upstreamUrl } from './upstream.mjs';
+import {
+  MEDIA_KINDS,
+  contentToText as contentToTextImpl,
+  normalizeContent,
+} from './content.mjs';
 
 /** 逐字使用（2.3 节）。{{TOOLS_JSON}} 为占位。 */
 export const SYSTEM_TEMPLATE = `你是一个可以调用外部工具的智能助手。你可以通过「工具调用」来执行操作或获取信息。
@@ -83,23 +88,15 @@ export function normalizeTools(body) {
   return out;
 }
 
-/** 多模态 content 数组 → 纯文本（只取 text 部分） */
+/** 多模态 content 数组 → 纯文本（只取 text 部分）。实现与 content.mjs 共用，避免两套逻辑漂移。 */
 export function contentToText(content) {
-  if (content === null || content === undefined) return '';
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((part) => {
-        if (typeof part === 'string') return part;
-        if (part && typeof part.text === 'string') return part.text;
-        if (part && typeof part.content === 'string') return part.content;
-        return '';
-      })
-      .filter(Boolean)
-      .join('\n');
-  }
-  if (typeof content === 'object') return content.text ?? JSON.stringify(content);
-  return String(content);
+  return contentToTextImpl(content);
+}
+
+/** content 里的媒体 part（保序），用于历史归一化时把图片留在原位 */
+function mediaPartsOf(content) {
+  if (!Array.isArray(content)) return [];
+  return content.filter((part) => part && typeof part === 'object' && MEDIA_KINDS[String(part.type ?? '')]);
 }
 
 function argsToObject(args) {
@@ -126,20 +123,44 @@ export function toolResultBlock(toolCallId, name, content) {
   return `<tool_result tool_call_id="${toolCallId ?? ''}" name="${name ?? ''}">\n${content ?? ''}\n</tool_result>`;
 }
 
+/** 把任意 content 当作 parts 数组看待（用于合并同角色消息） */
+function asParts(content) {
+  if (Array.isArray(content)) return content;
+  if (typeof content === 'string') return content ? [{ type: 'text', text: content }] : [];
+  if (content === null || content === undefined) return [];
+  if (typeof content === 'object') return [{ type: 'text', text: JSON.stringify(content) }];
+  return [{ type: 'text', text: String(content) }];
+}
+
+/**
+ * 同角色消息合并：
+ * - 两边都是纯文本 → 用空行拼接（保持原有语义）；
+ * - 任一方是数组/多模态 → 拼成新数组并保序，**绝不对数组做字符串化**（否则会变成 "[object Object]"）。
+ */
 function pushMerged(out, message) {
   const last = out[out.length - 1];
-  if (last && last.role === message.role) {
+  if (!last || last.role !== message.role) {
+    out.push({ ...message });
+    return;
+  }
+  if (typeof last.content === 'string' && typeof message.content === 'string') {
     last.content = `${last.content}\n\n${message.content}`.trim();
     return;
   }
-  out.push({ ...message });
+  last.content = [...asParts(last.content), ...asParts(message.content)];
 }
 
 /**
  * 历史归一化：system 单独处理，tool 合并成 user，assistant.tool_calls 变文本块。
+ * 媒体 part（图片/文件/音频）始终保留在 content 里，不会被文本化丢弃。
  * @param {Array<object>} messages
+ * @param {{imageMode?:'pass'|'placeholder'|'reject', logger?:object}} [options]
  */
-export function flattenMessages(messages = []) {
+export function flattenMessages(messages = [], options = {}) {
+  const imageMode = options.imageMode ?? 'pass';
+  const logger = options.logger ?? null;
+  const normalize = (content) => normalizeContent(content, { imageMode, logger });
+
   const nameById = new Map();
   for (const m of messages) {
     if (m?.role === 'assistant' && Array.isArray(m.tool_calls)) {
@@ -153,8 +174,20 @@ export function flattenMessages(messages = []) {
   let pendingResults = [];
   const flushResults = () => {
     if (!pendingResults.length) return;
-    pushMerged(out, { role: 'user', content: pendingResults.join('\n') });
+    const entries = pendingResults;
     pendingResults = [];
+    const hasMedia = entries.some((e) => e.media.length > 0);
+    if (!hasMedia) {
+      pushMerged(out, { role: 'user', content: entries.map((e) => e.block).join('\n') });
+      return;
+    }
+    // 有媒体：<tool_result> 文本块 + 媒体 part 一起保留在 content 数组里
+    const parts = [];
+    for (const e of entries) {
+      parts.push({ type: 'text', text: e.block });
+      parts.push(...e.media);
+    }
+    pushMerged(out, { role: 'user', content: parts });
   };
 
   for (const m of messages) {
@@ -166,28 +199,45 @@ export function flattenMessages(messages = []) {
     if (role === 'tool' || role === 'function') {
       const id = m.tool_call_id ?? m.name ?? '';
       const name = m.name ?? nameById.get(m.tool_call_id) ?? '';
-      pendingResults.push(toolResultBlock(id, name, contentToText(m.content)));
+      const normalized = normalize(m.content);
+      pendingResults.push({
+        block: toolResultBlock(id, name, contentToText(normalized)),
+        media: mediaPartsOf(normalized),
+      });
       continue;
     }
 
     flushResults();
 
     if (role === 'assistant') {
-      let text = contentToText(m.content);
-      if (Array.isArray(m.tool_calls) && m.tool_calls.length) {
-        const blocks = m.tool_calls.map((tc) =>
-          toolCallBlock(tc?.function?.name ?? '', argsToObject(tc?.function?.arguments)),
-        );
-        text = [text, ...blocks].filter((part) => part && part.trim()).join('\n');
+      const normalized = normalize(m.content);
+      const media = mediaPartsOf(normalized);
+      const text = contentToText(normalized);
+      const blocks =
+        Array.isArray(m.tool_calls) && m.tool_calls.length
+          ? m.tool_calls.map((tc) => toolCallBlock(tc?.function?.name ?? '', argsToObject(tc?.function?.arguments)))
+          : [];
+
+      if (media.length) {
+        // 助手消息带媒体：保持数组结构（文本 → 媒体 → 工具块）
+        const parts = [];
+        if (text.trim()) parts.push({ type: 'text', text });
+        parts.push(...media);
+        if (blocks.length) parts.push({ type: 'text', text: blocks.join('\n') });
+        pushMerged(out, { role: 'assistant', content: parts });
+        continue;
       }
-      if (!text.trim()) continue;
-      pushMerged(out, { role: 'assistant', content: text });
+
+      const merged = [text, ...blocks].filter((part) => part && part.trim()).join('\n');
+      if (!merged.trim()) continue;
+      pushMerged(out, { role: 'assistant', content: merged });
       continue;
     }
 
-    const text = contentToText(m.content);
-    if (!text.trim()) continue;
-    pushMerged(out, { role: 'user', content: text });
+    const normalized = normalize(m.content);
+    const media = mediaPartsOf(normalized);
+    if (!media.length && !contentToText(normalized).trim()) continue;
+    pushMerged(out, { role: 'user', content: normalized });
   }
   flushPending();
   return out;
@@ -259,7 +309,10 @@ export function buildUpstreamRequest(openaiBody, cfg = defaultConfig) {
 
   const body = {
     model: resolveModel(openaiBody?.model, cfg),
-    messages: [{ role: 'system', content: system }, ...flattenMessages(messages)],
+    messages: [
+      { role: 'system', content: system },
+      ...flattenMessages(messages, { imageMode: cfg.imageMode ?? 'pass', logger: cfg.logger ?? null }),
+    ],
   };
   const maxTokens = pickMaxTokens(openaiBody);
   if (maxTokens !== undefined) body.max_tokens = maxTokens;

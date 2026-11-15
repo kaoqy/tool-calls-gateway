@@ -195,6 +195,15 @@ async function gateM12() {
   if (ok) console.log('GATE M12 PASS');
 }
 
+// ---------------------------------------------------------------- M14（多模态：图片转发）
+async function gateM14() {
+  const e2e = runNode('media e2e', ['scripts/e2e_media.mjs']);
+  const unit = runNode('media test', ['--test', 'test/media.test.mjs'], { timeoutMs: 300000 });
+  const ok = e2e.ok && unit.ok;
+  record('M14', '多模态：图片/文件/音频原样转发（不再丢弃）', ok, ok ? '15 项 e2e + 26 项单测/端到端' : '见上方输出');
+  if (ok) console.log('GATE M14 PASS');
+}
+
 const ALL = [
   ['M0', gateM0],
   ['M1', gateM1],
@@ -208,6 +217,7 @@ const ALL = [
   ['M10', gateM10],
   ['M11', gateM11],
   ['M12', gateM12],
+  ['M14', gateM14],
 ];
 
 async function main() {

@@ -10,7 +10,7 @@ test('M0: 脚手架可加载，配置有默认值', () => {
   assert.equal(cfg.port, 8787);
   assert.equal(cfg.toolMode, 'auto');
   assert.equal(cfg.requestTimeoutMs, 60000);
-  assert.equal(cfg.maxBodyBytes, 2 * 1024 * 1024);
+  assert.equal(cfg.maxBodyBytes, 16 * 1024 * 1024);
   assert.equal(cfg.logLevel, 'info');
 });
 
