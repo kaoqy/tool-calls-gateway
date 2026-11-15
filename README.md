@@ -1,7 +1,7 @@
 # toolcall-gateway
 
 [![ci-and-publish](https://github.com/kaoqy/tool-calls-gateway/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/kaoqy/tool-calls-gateway/actions/workflows/docker-publish.yml)
-[![ghcr](https://img.shields.io/badge/ghcr.io-toolcall--gateway%3Av1.1.1-blue)](https://github.com/kaoqy/tool-calls-gateway/pkgs/container/toolcall-gateway)
+[![ghcr](https://img.shields.io/badge/ghcr.io-toolcall--gateway%3Av1.2.0-blue)](https://github.com/kaoqy/tool-calls-gateway/pkgs/container/toolcall-gateway)
 
 > **OpenAI 兼容 · 工具调用模拟** 轻量中转网关。
 > 让「只支持纯聊天」的上游模型（如 DeepSeek 纯聊天接口）在不改造下游 Agent / SDK / 客户端的前提下，**变相支持 tool_calls**。
@@ -10,28 +10,53 @@
 - 部署：单镜像 `node:20-alpine`，非 root（`USER node`），带 `HEALTHCHECK`，支持 `docker compose up`。
 - 无状态：网关不保存任何会话，见 [协议假设](#协议的硬性假设)。
 
-## 🚀 一键部署（3 种方式，选一个）
+## 🚀 部署
 
-已发布镜像：`ghcr.io/kaoqy/tool-calls-gateway:v1.1.1`（由 GitHub Actions 在打 `v*.*.*` tag 时自动构建并推送，linux/amd64 + linux/arm64）。
+> 已发布镜像：**`ghcr.io/kaoqy/tool-calls-gateway:v1.2.0`**（`linux/amd64` + `linux/arm64`，由 GitHub Actions 在打 tag 时自动构建并推送）
 
-### 方式 A：一条命令（脚本会自动建 `.env`、拉镜像、起容器、等健康检查）
+**前置条件**：Docker 20.10+（compose v2）；一个 OpenAI 兼容、只支持纯聊天的上游（Base URL + API Key）。
+
+三种方式任选其一，部署完都能在 `/admin` 里改上游，不用再动 env。
+
+### 方式 A · 一键脚本（推荐）
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/kaoqy/tool-calls-gateway/main/deploy.sh | sh
-# 首次运行会生成 ./toolcall-gateway/.env 并退出；填好 UPSTREAM_BASE_URL / UPSTREAM_API_KEY 后，再跑一次即可
-# 第二次会打印自动生成的 ADMIN_TOKEN —— 打开 http://127.0.0.1:8787/admin 输入它即可进设置页
 ```
 
-### 方式 B：docker compose（生产用预构建镜像）
+脚本会：生成 `./toolcall-gateway/.env` → 校验必填项 → 自动生成设置页令牌 → 拉镜像 → `docker compose up -d` → 轮询 `/healthz` 就绪。
+
+**第一次执行只会生成 `.env` 并退出**，填两个必填项后再跑一次：
 
 ```bash
-git clone https://github.com/kaoqy/tool-calls-gateway.git && cd tool-calls-gateway   # 或只下载 docker-compose.prod.yml
-cp .env.example .env && vi .env                          # 填上游地址与密钥
-docker compose -f docker-compose.prod.yml up -d
-curl -s localhost:8787/healthz                           # {"status":"ok"}
+cd toolcall-gateway
+vi .env          # UPSTREAM_BASE_URL / UPSTREAM_API_KEY
+sh deploy.sh     # 或在原目录重新执行上面的 curl
 ```
 
-### 方式 C：纯 docker run
+第二次输出会给出：
+
+```
+==> 已生成设置页令牌：ADMIN_TOKEN=<随机 32 位>
+==> 就绪：{"status":"ok"}
+OpenAI 兼容端点： http://127.0.0.1:8787/v1
+设置页：         http://127.0.0.1:8787/admin
+```
+
+### 方式 B · docker compose（要改配置 / 长期运行）
+
+```bash
+git clone https://github.com/kaoqy/tool-calls-gateway.git && cd tool-calls-gateway
+cp .env.example .env
+vi .env                                   # 至少填 UPSTREAM_BASE_URL / UPSTREAM_API_KEY / ADMIN_TOKEN
+docker compose -f docker-compose.prod.yml up -d
+curl -s localhost:8787/healthz            # {"status":"ok"}
+```
+
+> `docker-compose.prod.yml` 用预构建镜像（不 build），带 `read_only` + `no-new-privileges`，配置持久化在 named volume `tcg-data:/app/data`。
+> 想自己构建：`docker compose up -d --build`（读 `docker-compose.yml`）。
+
+### 方式 C · docker run（临时验证 / 已有编排）
 
 ```bash
 docker run -d --name toolcall-gateway \
@@ -39,13 +64,53 @@ docker run -d --name toolcall-gateway \
   -e UPSTREAM_BASE_URL=https://api.deepseek.com \
   -e UPSTREAM_API_KEY=sk-你的密钥 \
   -e DEFAULT_MODEL=deepseek-chat \
+  -e ADMIN_TOKEN=$(openssl rand -hex 16) \
+  -v tcg-data:/app/data \
   --restart unless-stopped \
-  ghcr.io/kaoqy/tool-calls-gateway:v1.1.1
+  ghcr.io/kaoqy/tool-calls-gateway:v1.2.0
 
+docker logs toolcall-gateway | tail -5       # 确认 listening
 curl -s localhost:8787/healthz
 ```
 
-> 部署完成后，把下游 SDK 的 `base_url` 指向 `http://<host>:8787/v1` 即可（见 [4. 客户端接入示例](#4-客户端接入示例)）。
+### 首次配置（3 步）
+
+1. 打开 `http://<host>:8787/admin`，输入 `ADMIN_TOKEN`（方式 B/C 里自己填的那个）。
+2. 填上游 Base URL 与 API Key → 点 **测试连接** 确认能列出模型（顺便看 `supports_tool_call`：`false` 说明必须走提示词模拟）。
+3. 点 **保存并应用** —— 立即热生效，不用重启；配置写到 `/app/data/settings.json`。
+
+### 部署后自检
+
+```bash
+# 1) 健康
+curl -s localhost:8787/healthz
+
+# 2) 上游连通（经网关）
+curl -s localhost:8787/v1/models -H "authorization: Bearer $GATEWAY_API_KEY"
+
+# 3) 带 tools 的请求能否拿到 tool_calls
+curl -s localhost:8787/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model":"deepseek-chat","messages":[{"role":"user","content":"北京天气？"}],
+       "tools":[{"type":"function","function":{"name":"get_weather","description":"查天气",
+       "parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}}]}' \
+  | head -c 400
+```
+
+预期第 3 步返回 `finish_reason: "tool_calls"` 与 `tool_calls[0].function.arguments`。
+
+### 部署常见问题
+
+| 现象 | 原因 / 处理 |
+| --- | --- |
+| 打开 `/admin` 返回 401 | 容器里没设 `ADMIN_TOKEN`（端口映射下来源不是回环，无法免登录）；`deploy.sh` 会自动生成，手动部署请自行设置 |
+| `docker compose` 报 `env file .env not found` | 先 `cp .env.example .env` |
+| 拉取镜像 `denied` | 仓库/镜像是私有的：`echo $GITHUB_TOKEN \| docker login ghcr.io -u <用户名> --password-stdin` |
+| 上游返回 `403 需要重新登录或人机验证` | 上游是 web 类模型通道，触发了反爬；网关原样透传，换 API 计费通道或降低调用频率 |
+| 容器重建后设置丢了 | 没挂 `/app/data` 卷；用 compose（已内置 `tcg-data`）或加 `-v tcg-data:/app/data` |
+| 想回到 env 配置 | 设置页「恢复环境变量默认值」，或删掉容器内 `/app/data/settings.json` |
+
+> 部署完成后，把下游 SDK 的 `base_url` 指向 `http://<host>:8787/v1`（见 [4. 客户端接入示例](#4-客户端接入示例)）。
 > 若设置了 `GATEWAY_API_KEY`，下游需带 `Authorization: Bearer <GATEWAY_API_KEY>`；网关发往上游时始终改用 `UPSTREAM_API_KEY`。
 
 ---
@@ -54,6 +119,10 @@ curl -s localhost:8787/healthz
 
 打开 **`http://<host>:8787/admin`**，在网页里改上游并**立即热生效**——不用改 `.env`、不用重启、不用重建容器。
 
+![设置页](docs/admin-ui.png)
+
+左侧常驻「当前生效」摘要（上游 host / 默认模型 / 工具模拟 / UI 覆盖项数），中间是分区表单，底部是保存条——有改动才会点亮「保存并应用」，`Ctrl/Cmd + S` 也能保存。
+
 | 分类 | 可改字段 |
 | --- | --- |
 | 上游 | `upstreamBaseUrl`、`upstreamApiKey`（掩码回显）、`defaultModel`、`modelMap`、`modelOverride` |
@@ -61,10 +130,11 @@ curl -s localhost:8787/healthz
 
 优先级：**UI 保存的设置文件 > 环境变量 > 内置默认值**。每个字段旁边都有来源徽标（`UI 已覆盖` / `来自 env` / `默认值`），不会出现"到底哪个生效"的歧义。
 
-- **密钥不回显**：只返回 `sk-***abcd` 形式的 hint；留空保存 = 不修改，填新值 = 覆盖。
+- **密钥不回显**：只返回 `sk-***abcd` 形式的 hint；留空保存 = 不修改，填新值 = 覆盖；输入框旁有「显示/隐藏」。
 - **测试连接**：用当前表单值（不保存）打一次 `GET /v1/models`，返回状态码、延迟与模型列表。
-- **列出模型**：把上游模型列成表格，并标注 `supports_tool_call`（`false` 就说明必须走提示词模拟）。
+- **列出模型**：表格列出上游模型并标注 `supports_tool_call`，每行可一键「设为默认」（`false` 就说明必须走提示词模拟）。
 - **工具模拟自检**：用保存的配置真发一次带 `tools` 的请求（**消耗 1 次上游调用**），直接显示 `finish_reason`、`tool_calls` 数量与参数样例。
+- **接入信息**：页面底部给出本实例的 Base URL / Chat Completions / 健康检查地址与一段可复制的 `curl`（自动带上当前默认模型与网关 Key 状态）。
 - **恢复环境变量默认值**：一键清空所有 UI 覆盖项（删除设置文件）。
 - **访问控制**：分两种模式——
   - 本机裸跑（来源是 `127.0.0.1` / `::1`）：**免登录**，直接打开 `/admin`。
@@ -539,13 +609,13 @@ toolcall-gateway/
 | --- | --- |
 | `pull_request` | 只跑测试（Node 20/22 矩阵、`npm test`、`npm run gate`、密钥扫描），不推镜像 |
 | push 到 `main` | 测试 → 构建并推送 `ghcr.io/<owner>/<repo>:latest` 与 `sha-xxxxxxx` → 镜像冒烟（起容器验 `/healthz` 与 `USER node`） |
-| push tag `v1.1.1` | 同上，并额外推送 `:v1.1.1`、`:1.1.1`、`:1.0` |
+| push tag `v1.2.0` | 同上，并额外推送 `:v1.2.0`、`:1.2.0`、`:1.0` |
 
-发布一个版本（本项目当前版本即 `v1.1.1`）：
+发布一个版本（本项目当前版本即 `v1.2.0`）：
 
 ```bash
-git tag v1.1.1
-git push origin v1.1.1     # 触发构建，产出 ghcr.io/<owner>/<repo>:v1.1.1
+git tag v1.2.0
+git push origin v1.2.0     # 触发构建，产出 ghcr.io/<owner>/<repo>:v1.2.0
 ```
 
 镜像为多架构（`linux/amd64` + `linux/arm64`），带 SBOM 与 provenance。GHCR 使用内置 `GITHUB_TOKEN`（`packages: write`），无需额外 secret。

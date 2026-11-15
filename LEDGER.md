@@ -251,6 +251,9 @@
 - **Docker 实测发现并修复的问题**：容器端口映射（`-p 8787:8787`）下请求来源 IP 是网桥网关（如 `172.17.0.1`），"仅回环"策略会把 `/admin` 挡成 `401`。
   - 修复：新增 `ADMIN_TOKEN` 登录流——`/admin` 未授权时返回登录页，`POST /admin/api/login` 换 `HttpOnly` Cookie（24h），另支持 `Authorization: Bearer`；`deploy.sh` 在 `.env` 里自动生成令牌并打印。
   - 验证：CI 冒烟新增"无令牌必须 401 / 带令牌返回设置页与设置 API"，`sh -n deploy.sh` + `bash -n deploy.sh` 语法检查一并进 CI。
+- **v1.2.0 UI 重构**（2026-11-15 14:xx）：侧边栏「当前生效」摘要 + 分区表单 + 底部保存条（脏状态 + `Ctrl/Cmd+S`）+ toast + 模型表格（可一键设为默认）+ 接入信息（含可复制 curl）+ 响应式布局 + 深/浅色自适应；登录页同步重做。
+  - 同时修掉一个真实缺陷：模板字符串里的反斜杠转义把内联 JS 写坏（`'... \\'` → `'... \'`），页面白屏且不报错。新增 `test/ui.test.mjs`（3 项）做回归：内联脚本必须能 `new Function` 解析、不得引外部资源、关键控件 id 齐全。
+  - 新增 `meta.adminMode` 字段，页面能区分「令牌保护 / 本机访问」。
 
 ## 5. 未验证项汇总
 
@@ -603,5 +606,6 @@ docker run -d --name toolcall-gateway -p 8787:8787 \
 | `v1.0.0` | `0138ac1` | `43675461000` ✅ | `sha256:e2fc0822…` | 首次发布：模拟工具调用网关 + 51 单测 + 离线全量 gate |
 | `v1.1.0` | `d2e37c5` | `43678360516` ⚠️ smoke 失败 | `sha256:f1b98ae8…` | 应用内设置初版。已知问题：Docker 端口映射下 `/admin` 返回 401（仅回环策略），**用 v1.1.1** |
 | `v1.1.1` | `9487663` | `43678695307` ✅ | `sha256:d1a377d6…` | 修复上述问题：`ADMIN_TOKEN` 登录 + HttpOnly Cookie；CI 冒烟覆盖 401/200 与 `deploy.sh` 语法 |
+| `v1.2.0` | 待填 | 待填 | 待填 | 设置页 UI 重构（侧边栏/脏状态/模型表/接入信息）+ `test/ui.test.mjs` 回归防线；README 部署章节重写 |
 
 镜像：`ghcr.io/kaoqy/tool-calls-gateway:{v1.1.1,1.1.1,1.1,latest,sha-*}`，平台 `linux/amd64` + `linux/arm64`。

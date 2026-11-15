@@ -276,6 +276,12 @@ function withCandidate(config, patch) {
   return next;
 }
 
+/** 设置页视图：附带"当前鉴权模式"，让页面能显示 令牌保护 / 本机访问 */
+function adminView(settings, config) {
+  const view = settings.publicView();
+  return { ...view, meta: { ...view.meta, adminMode: config.adminToken ? 'token' : 'loopback' } };
+}
+
 async function handleAdminApi(req, res, url, { config, settings, logger }) {
   if (!settings) return sendError(res, 503, 'settings_unavailable', '本实例没有启用设置存储');
   const pathname = url.pathname.replace(/\/+$/, '');
@@ -286,7 +292,7 @@ async function handleAdminApi(req, res, url, { config, settings, logger }) {
   }
 
   if (pathname === '/admin/api/settings' && req.method === 'GET') {
-    return sendJson(res, 200, settings.publicView());
+    return sendJson(res, 200, adminView(settings, config));
   }
 
   if (pathname === '/admin/api/settings' && (req.method === 'PUT' || req.method === 'POST')) {
@@ -294,7 +300,8 @@ async function handleAdminApi(req, res, url, { config, settings, logger }) {
     if (parsed.error) return sendError(res, parsed.error.status, parsed.error.type, parsed.error.message);
     const patch = parsed.json?.settings ?? parsed.json ?? {};
     try {
-      const view = settings.update(patch);
+      settings.update(patch);
+      const view = adminView(settings, config);
       logger.info('settings applied', { overrides: view.meta.activeOverrides });
       return sendJson(res, 200, view);
     } catch (err) {
@@ -303,7 +310,8 @@ async function handleAdminApi(req, res, url, { config, settings, logger }) {
   }
 
   if (pathname === '/admin/api/settings/reset' && req.method === 'POST') {
-    return sendJson(res, 200, settings.reset());
+    settings.reset();
+    return sendJson(res, 200, adminView(settings, config));
   }
 
   if (pathname === '/admin/api/test' && req.method === 'POST') {

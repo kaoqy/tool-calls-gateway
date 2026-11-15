@@ -5,12 +5,12 @@
 #   # 或本地：sh deploy.sh
 #
 # 可用环境变量覆盖：
-#   TCG_IMAGE    镜像地址（默认 ghcr.io/kaoqy/tool-calls-gateway:v1.1.1）
+#   TCG_IMAGE    镜像地址（默认 ghcr.io/kaoqy/tool-calls-gateway:v1.2.0）
 #   HOST_PORT    宿主端口（默认 8787）
 #   INSTALL_DIR  安装目录（默认 ./toolcall-gateway）
 set -eu
 
-IMAGE="${TCG_IMAGE:-ghcr.io/kaoqy/tool-calls-gateway:v1.1.1}"
+IMAGE="${TCG_IMAGE:-ghcr.io/kaoqy/tool-calls-gateway:v1.2.0}"
 PORT="${HOST_PORT:-8787}"
 DIR="${INSTALL_DIR:-./toolcall-gateway}"
 
