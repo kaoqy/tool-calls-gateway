@@ -3,10 +3,14 @@
 //   GET  /v1/models            透传上游
 //   POST /v1/chat/completions  含 tools/functions → 模拟工具调用；否则原样透传
 import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
 import { Readable } from 'node:stream';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { config as defaultConfig, resolveModel } from './config.mjs';
 import { logger as defaultLogger } from './logger.mjs';
+import { createSettingsStore, normalizePatch } from './settings.mjs';
+import { renderAdminHtml } from './admin-ui.mjs';
 import {
   callUpstreamGet,
   callUpstreamJson,
@@ -97,9 +101,11 @@ async function pipeUpstreamStream(res, opened, logger) {
   }
 }
 
-export function createServer({ config = defaultConfig, logger = defaultLogger } = {}) {
+export function createServer({ settings, config = defaultConfig, logger = defaultLogger } = {}) {
+  // 有 settings 时每个请求都取最新配置（UI 保存后立即热生效，无需重启）
+  const getConfig = typeof settings?.get === 'function' ? () => settings.get() : () => config;
   const server = http.createServer((req, res) => {
-    handleRequest(req, res, config, logger).catch((err) => {
+    handleRequest(req, res, { getConfig, settings, logger }).catch((err) => {
       logger.error('unhandled request error', { message: err?.message ?? String(err) });
       sendError(res, 500, 'internal_error', '网关内部错误');
     });
@@ -117,12 +123,56 @@ function rejectUnauthorized(req, res, config) {
   return true;
 }
 
-async function handleRequest(req, res, config, logger) {
+/** 设置页鉴权：设了 ADMIN_TOKEN 就用 Bearer；否则只允许本机回环访问。 */
+function adminAuthorized(req, config) {
+  if (config.adminToken) {
+    const token = String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, '').trim();
+    return token === config.adminToken;
+  }
+  const ip = req.socket.remoteAddress ?? '';
+  return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+}
+
+function rejectAdmin(req, res, config) {
+  if (adminAuthorized(req, config)) return false;
+  sendError(
+    res,
+    401,
+    'admin_unauthorized',
+    config.adminToken
+      ? '设置页需要 Authorization: Bearer <ADMIN_TOKEN>'
+      : '设置页默认只允许本机访问；远程访问请设置 ADMIN_TOKEN 并携带 Bearer 令牌',
+  );
+  return true;
+}
+
+async function handleRequest(req, res, ctx) {
+  const { getConfig, settings, logger } = ctx;
+  const config = getConfig();
   const url = new URL(req.url ?? '/', 'http://127.0.0.1');
   logger.debug('request', { method: req.method, path: url.pathname });
 
   if (req.method === 'GET' && url.pathname === '/healthz') {
     return sendJson(res, 200, { status: 'ok' });
+  }
+
+  if (req.method === 'GET' && (url.pathname === '/admin' || url.pathname === '/admin/')) {
+    if (rejectAdmin(req, res, config)) return;
+    const html = renderAdminHtml({ version: packageVersion() });
+    res.writeHead(200, {
+      'content-type': 'text/html; charset=utf-8',
+      'cache-control': 'no-store',
+      'x-frame-options': 'DENY',
+      'referrer-policy': 'no-referrer',
+      'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'",
+    });
+    res.end(html);
+    return;
+  }
+
+  if (url.pathname.startsWith('/admin/api/')) {
+    if (rejectAdmin(req, res, config)) return;
+    return handleAdminApi(req, res, url, { config, settings, logger });
   }
 
   if (req.method === 'GET' && url.pathname === '/v1/models') {
@@ -136,6 +186,181 @@ async function handleRequest(req, res, config, logger) {
   }
 
   return sendError(res, 404, 'not_found', `未知路由: ${req.method} ${url.pathname}`);
+}
+
+// ---------------------------------------------------------------- 设置页 API
+let cachedVersion = null;
+function packageVersion() {
+  if (cachedVersion !== null) return cachedVersion;
+  try {
+    const file = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'package.json');
+    cachedVersion = JSON.parse(fs.readFileSync(file, 'utf8')).version ?? '';
+  } catch {
+    cachedVersion = '';
+  }
+  return cachedVersion;
+}
+
+async function readJsonBody(req, maxBytes) {
+  let raw;
+  try {
+    raw = await readBody(req, maxBytes);
+  } catch (err) {
+    if (err.code === 'BODY_TOO_LARGE') return { error: { status: 413, type: 'payload_too_large', message: '请求体过大' } };
+    throw err;
+  }
+  try {
+    return { json: JSON.parse(raw.toString('utf8') || '{}') };
+  } catch {
+    return { error: { status: 400, type: 'invalid_json', message: '请求体不是合法 JSON' } };
+  }
+}
+
+function sendSettingsError(res, err) {
+  if (err?.code === 'SETTINGS_INVALID') {
+    return sendError(res, 400, 'settings_invalid', err.message, { errors: err.errors });
+  }
+  if (err?.code === 'UPSTREAM_TIMEOUT') {
+    return sendError(res, 504, 'upstream_timeout', '上游响应超时');
+  }
+  return sendError(res, 500, 'settings_error', err?.message ?? '设置操作失败');
+}
+
+/** 用候选配置覆盖当前配置（不落盘），用于"保存前先测一下" */
+function withCandidate(config, patch) {
+  const clean = normalizePatch(patch ?? {});
+  const next = { ...config };
+  for (const [field, value] of Object.entries(clean)) {
+    if (value === null) continue;
+    next[field] = value;
+  }
+  return next;
+}
+
+async function handleAdminApi(req, res, url, { config, settings, logger }) {
+  if (!settings) return sendError(res, 503, 'settings_unavailable', '本实例没有启用设置存储');
+  const pathname = url.pathname.replace(/\/+$/, '');
+
+  if (pathname === '/admin/api/settings' && req.method === 'GET') {
+    return sendJson(res, 200, settings.publicView());
+  }
+
+  if (pathname === '/admin/api/settings' && (req.method === 'PUT' || req.method === 'POST')) {
+    const parsed = await readJsonBody(req, 256 * 1024);
+    if (parsed.error) return sendError(res, parsed.error.status, parsed.error.type, parsed.error.message);
+    const patch = parsed.json?.settings ?? parsed.json ?? {};
+    try {
+      const view = settings.update(patch);
+      logger.info('settings applied', { overrides: view.meta.activeOverrides });
+      return sendJson(res, 200, view);
+    } catch (err) {
+      return sendSettingsError(res, err);
+    }
+  }
+
+  if (pathname === '/admin/api/settings/reset' && req.method === 'POST') {
+    return sendJson(res, 200, settings.reset());
+  }
+
+  if (pathname === '/admin/api/test' && req.method === 'POST') {
+    const parsed = await readJsonBody(req, 64 * 1024);
+    if (parsed.error) return sendError(res, parsed.error.status, parsed.error.type, parsed.error.message);
+    let candidate;
+    try {
+      candidate = withCandidate(config, parsed.json?.settings ?? {});
+    } catch (err) {
+      return sendSettingsError(res, err);
+    }
+    const started = Date.now();
+    try {
+      const result = await callUpstreamGet({
+        url: upstreamUrl(candidate.upstreamBaseUrl, '/v1/models'),
+        apiKey: candidate.upstreamApiKey,
+        timeoutMs: Math.min(candidate.requestTimeoutMs || 15000, 15000),
+      });
+      const latencyMs = Date.now() - started;
+      if (result.status >= 400) {
+        return sendError(res, 502, 'upstream_error', `上游返回 HTTP ${result.status}`, {
+          upstream: String(result.text ?? '').slice(0, 300),
+        });
+      }
+      const models = (Array.isArray(result.json?.data) ? result.json.data : []).map((m) => ({
+        id: m?.id ?? '',
+        supports_tool_call: m?.supports_tool_call,
+      }));
+      return sendJson(res, 200, {
+        ok: true,
+        status: result.status,
+        latencyMs,
+        baseUrl: candidate.upstreamBaseUrl,
+        models,
+      });
+    } catch (err) {
+      return sendSettingsError(res, err);
+    }
+  }
+
+  if (pathname === '/admin/api/test-tool' && req.method === 'POST') {
+    const tools = [
+      {
+        type: 'function',
+        function: {
+          name: 'get_time',
+          description: '获取指定时区的当前时间',
+          parameters: {
+            type: 'object',
+            properties: { timezone: { type: 'string' } },
+            required: ['timezone'],
+          },
+        },
+      },
+    ];
+    const started = Date.now();
+    try {
+      const built = buildUpstreamRequest(
+        {
+          model: config.defaultModel || 'deepseek-chat',
+          messages: [{ role: 'user', content: '请调用 get_time 工具告诉我上海现在的时间。' }],
+          tools,
+          max_tokens: 256,
+        },
+        config,
+      );
+      const result = await callUpstreamJson({
+        url: built.url,
+        headers: built.headers,
+        body: JSON.stringify(built.body),
+        timeoutMs: config.requestTimeoutMs,
+      });
+      const latencyMs = Date.now() - started;
+      if (result.status >= 400) {
+        return sendError(res, 502, 'upstream_error', `上游返回 HTTP ${result.status}`, {
+          upstream: String(result.text ?? '').slice(0, 300),
+        });
+      }
+      const parsed = resolveToolCalls({
+        text: assistantTextFrom(result.json),
+        nativeToolCalls: extractNativeToolCalls(result.json),
+      });
+      logger.info('admin self-test', {
+        finish: parsed.finishReason,
+        toolCalls: parsed.toolCalls.length,
+        latencyMs,
+      });
+      return sendJson(res, 200, {
+        ok: true,
+        finishReason: parsed.finishReason,
+        toolCalls: parsed.toolCalls.length,
+        sample: parsed.toolCalls[0]?.function?.arguments?.slice(0, 200) ?? null,
+        model: result.json?.model ?? built.body.model,
+        latencyMs,
+      });
+    } catch (err) {
+      return sendSettingsError(res, err);
+    }
+  }
+
+  return sendError(res, 404, 'not_found', `未知设置接口: ${req.method} ${pathname}`);
 }
 
 async function handleModels(res, config, logger) {
@@ -477,8 +702,16 @@ async function handleSimulated(req, res, config, logger, body) {
   }
 }
 
-export function startServer({ config = defaultConfig, logger = defaultLogger } = {}) {
-  const server = createServer({ config, logger });
+export function startServer({ config = defaultConfig, logger = defaultLogger, settings } = {}) {
+  const store =
+    settings ??
+    createSettingsStore({
+      env: process.env,
+      filePath: path.resolve(config.settingsFile || path.join(config.dataDir, 'settings.json')),
+      logger,
+      version: packageVersion(),
+    });
+  const server = createServer({ settings: store, config, logger });
   server.listen(config.port, () => {
     const addr = server.address();
     const port = typeof addr === 'object' && addr ? addr.port : config.port;
@@ -486,6 +719,8 @@ export function startServer({ config = defaultConfig, logger = defaultLogger } =
       port,
       toolMode: config.toolMode,
       upstream: config.upstreamBaseUrl,
+      settingsFile: store.filePath,
+      admin: config.adminToken ? 'token-required' : 'loopback-only',
     });
   });
   return server;

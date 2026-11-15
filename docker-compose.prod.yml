@@ -2,7 +2,7 @@
 #   docker compose -f docker-compose.prod.yml up -d
 services:
   toolcall-gateway:
-    image: ${TCG_IMAGE:-ghcr.io/kaoqy/tool-calls-gateway:v1.0.0}
+    image: ${TCG_IMAGE:-ghcr.io/kaoqy/tool-calls-gateway:v1.1.0}
     container_name: toolcall-gateway
     ports:
       - "${HOST_PORT:-8787}:8787"
@@ -12,6 +12,8 @@ services:
       PORT: "8787"
     restart: unless-stopped
     read_only: true
+    volumes:
+      - tcg-data:/app/data
     tmpfs:
       - /tmp
     security_opt:
@@ -31,3 +33,6 @@ services:
       timeout: 5s
       start_period: 5s
       retries: 3
+
+volumes:
+  tcg-data:

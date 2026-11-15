@@ -14,6 +14,10 @@ COPY --from=deps --chown=node:node /app/package.json ./package.json
 COPY --chown=node:node src ./src
 COPY --chown=node:node mock ./mock
 
+# 设置文件落盘目录（docker compose 里挂 named volume，容器重建不丢配置）
+RUN mkdir -p /app/data && chown -R node:node /app/data
+VOLUME ["/app/data"]
+
 USER node
 EXPOSE 8787
 

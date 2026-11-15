@@ -88,6 +88,10 @@ export function loadConfig(env = process.env) {
     reasoningPassthrough: !(reasoning === 'off' || reasoning === 'false' || reasoning === '0'),
     liveModel: (env.LIVE_MODEL ?? '').trim() || DEFAULT_LIVE_MODEL,
     maxLiveCalls: toInt(env.MAX_LIVE_CALLS, DEFAULT_MAX_LIVE_CALLS) || DEFAULT_MAX_LIVE_CALLS,
+    // ---- 第三轮新增：应用内设置 ----
+    adminToken: (env.ADMIN_TOKEN ?? '').trim(), // 设置后 /admin 需要 Bearer；不设则只允许本机回环访问
+    dataDir: (env.DATA_DIR ?? '').trim() || 'data',
+    settingsFile: (env.SETTINGS_FILE ?? '').trim(), // 可选：直接指定 settings.json 路径
   });
 }
 

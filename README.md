@@ -1,7 +1,7 @@
 # toolcall-gateway
 
 [![ci-and-publish](https://github.com/kaoqy/tool-calls-gateway/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/kaoqy/tool-calls-gateway/actions/workflows/docker-publish.yml)
-[![ghcr](https://img.shields.io/badge/ghcr.io-toolcall--gateway%3Av1.0.0-blue)](https://github.com/kaoqy/tool-calls-gateway/pkgs/container/toolcall-gateway)
+[![ghcr](https://img.shields.io/badge/ghcr.io-toolcall--gateway%3Av1.1.0-blue)](https://github.com/kaoqy/tool-calls-gateway/pkgs/container/toolcall-gateway)
 
 > **OpenAI 兼容 · 工具调用模拟** 轻量中转网关。
 > 让「只支持纯聊天」的上游模型（如 DeepSeek 纯聊天接口）在不改造下游 Agent / SDK / 客户端的前提下，**变相支持 tool_calls**。
@@ -12,7 +12,7 @@
 
 ## 🚀 一键部署（3 种方式，选一个）
 
-已发布镜像：`ghcr.io/kaoqy/tool-calls-gateway:v1.0.0`（由 GitHub Actions 在打 `v*.*.*` tag 时自动构建并推送，linux/amd64 + linux/arm64）。
+已发布镜像：`ghcr.io/kaoqy/tool-calls-gateway:v1.1.0`（由 GitHub Actions 在打 `v*.*.*` tag 时自动构建并推送，linux/amd64 + linux/arm64）。
 
 ### 方式 A：一条命令（脚本会自动建 `.env`、拉镜像、起容器、等健康检查）
 
@@ -39,7 +39,7 @@ docker run -d --name toolcall-gateway \
   -e UPSTREAM_API_KEY=sk-你的密钥 \
   -e DEFAULT_MODEL=deepseek-chat \
   --restart unless-stopped \
-  ghcr.io/kaoqy/tool-calls-gateway:v1.0.0
+  ghcr.io/kaoqy/tool-calls-gateway:v1.1.0
 
 curl -s localhost:8787/healthz
 ```
@@ -48,6 +48,27 @@ curl -s localhost:8787/healthz
 > 若设置了 `GATEWAY_API_KEY`，下游需带 `Authorization: Bearer <GATEWAY_API_KEY>`；网关发往上游时始终改用 `UPSTREAM_API_KEY`。
 
 ---
+
+## 🖥 应用内设置（不用改 env）
+
+打开 **`http://<host>:8787/admin`**，在网页里改上游并**立即热生效**——不用改 `.env`、不用重启、不用重建容器。
+
+| 分类 | 可改字段 |
+| --- | --- |
+| 上游 | `upstreamBaseUrl`、`upstreamApiKey`（掩码回显）、`defaultModel`、`modelMap`、`modelOverride` |
+| 网关 | `gatewayApiKey`（掩码回显）、`toolMode`、`reasoningPassthrough`、`requestTimeoutMs`、`maxBodyBytes` |
+
+优先级：**UI 保存的设置文件 > 环境变量 > 内置默认值**。每个字段旁边都有来源徽标（`UI 已覆盖` / `来自 env` / `默认值`），不会出现"到底哪个生效"的歧义。
+
+- **密钥不回显**：只返回 `sk-***abcd` 形式的 hint；留空保存 = 不修改，填新值 = 覆盖。
+- **测试连接**：用当前表单值（不保存）打一次 `GET /v1/models`，返回状态码、延迟与模型列表。
+- **列出模型**：把上游模型列成表格，并标注 `supports_tool_call`（`false` 就说明必须走提示词模拟）。
+- **工具模拟自检**：用保存的配置真发一次带 `tools` 的请求（**消耗 1 次上游调用**），直接显示 `finish_reason`、`tool_calls` 数量与参数样例。
+- **恢复环境变量默认值**：一键清空所有 UI 覆盖项（删除设置文件）。
+- **访问控制**：默认只允许本机（`127.0.0.1` / `::1`）。远程打开请设置 `ADMIN_TOKEN`，并带 `Authorization: Bearer <ADMIN_TOKEN>`。
+- **持久化**：设置写到 `DATA_DIR/settings.json`（默认 `data/`，权限 0600）。容器部署务必挂 volume（compose 已内置 `tcg-data:/app/data`），否则重建会丢。
+
+> 安全提示：设置页能改上游地址，等价于一个"代理配置"入口，请只在内网暴露或放在带鉴权的反代之后。
 
 ## 1. 它解决什么问题
 
@@ -127,6 +148,9 @@ docker compose down
 | `LIVE_MODEL` | `deepseek-web-flash` | live 脚本使用的真实模型 |
 | `MAX_LIVE_CALLS` | `40` | 每个 live 脚本进程最多打多少次真实上游（超出直接抛错并停止） |
 | `LIVE_DELAY_MS` | `1500`/`2000` | live 脚本的请求间隔（节流，避免触发 web 类上游的风控/人机验证） |
+| `ADMIN_TOKEN` | 空 | 设置页令牌。设置后 `/admin` 需 `Authorization: Bearer <ADMIN_TOKEN>`；不设则只允许本机回环访问 |
+| `DATA_DIR` | `data` | 设置文件目录（`settings.json`，权限 0600）。容器内务必挂 volume |
+| `SETTINGS_FILE` | 空 | 直接指定设置文件完整路径，优先级高于 `DATA_DIR` |
 
 ## 3. 端点
 
@@ -135,6 +159,12 @@ docker compose down
 | GET | `/healthz` | 返回 `{"status":"ok"}`（HEALTHCHECK 用） |
 | GET | `/v1/models` | 透传上游 |
 | POST | `/v1/chat/completions` | 含 `tools`/`functions` → 模拟；否则透传 |
+| GET | `/admin` | 设置页（HTML，无外部资源） |
+| GET | `/admin/api/settings` | 当前生效配置（密钥掩码）+ 每个字段的来源 |
+| PUT | `/admin/api/settings` | 保存并热生效（只接受白名单字段，空值 = 取消覆盖） |
+| POST | `/admin/api/settings/reset` | 清除全部 UI 覆盖项，回落 env |
+| POST | `/admin/api/test` | 用候选配置测试上游 `GET /models`（不保存） |
+| POST | `/admin/api/test-tool` | 用当前配置跑一次工具模拟自检（消耗 1 次上游调用） |
 
 错误统一为 OpenAI 风格：
 
@@ -425,6 +455,7 @@ npm run e2e:live          # 真实双轮工具循环（--live）
 | G8 | 协议健壮性：reasoning 隔离 / 原生 tool_calls 兜底 / 参数特殊字符 / max_tokens 别名 / 异常 SSE / 模型映射 / 网关鉴权 + `conformance` dry 矩阵 35 项 |
 | G9 | 真实端点：`conformance --live` + `e2e_live --live` + `hitrate --live`（默认跳过，需 `--live`） |
 | G10 | Codex 形状（dry 恒跑；`--live` 时再加真实端点） |
+| G11 | 应用内设置（8 项存储单测 + 9 项 UI/热生效/鉴权 e2e） |
 
 `mock/upstream.mjs` 是可控的上游替身，通过 `X-Mock-Mode` 头、`?mode=` 或 model 名（`mock-<mode>[-<status>]`）选择模式：
 
@@ -464,6 +495,8 @@ toolcall-gateway/
 ├─ src/
 │  ├─ server.mjs           # http 服务 + 路由 + 鉴权 + 透传/模拟分支
 │  ├─ config.mjs           # 环境变量 + MODEL_MAP 解析/模型映射
+│  ├─ settings.mjs         # 应用内设置：校验/持久化/热生效/密钥脱敏
+│  ├─ admin-ui.mjs         # 设置页 HTML（单文件，零外部资源）
 │  ├─ upstream.mjs         # 调上游（超时/错误分类）
 │  ├─ prompt.mjs           # buildUpstreamRequest：注入 + 归一化 + 剥离
 │  ├─ protocol.mjs         # parseModelOutput / repairJson / 原生 tool_calls / 合成响应与 SSE
@@ -480,6 +513,7 @@ toolcall-gateway/
 │  ├─ e2e_passthrough.mjs / e2e_stream_tool.mjs / e2e_mock.mjs
 │  └─ lib/harness.mjs · lib/live.mjs   # 子进程/HTTP/额度/报告/脱敏
 ├─ out/                    # live 报告的 JSON/Markdown（运行时生成）
+├─ data/                   # settings.json（设置页保存的覆盖项，0600；运行时生成）
 └─ LEDGER.md               # 里程碑账本（含每轮 gate 的真实输出）
 ```
 
@@ -489,6 +523,8 @@ toolcall-gateway/
 - 容器内以 `node` 用户运行，不带任何构建工具链。
 - 入站请求体大小受限（`MAX_BODY_BYTES`），避免被大包打爆内存。
 - 网关**不是**多租户鉴权层：请只在内网 / 反代后面暴露，或自行在反代上做鉴权。
+- 设置页默认只允许本机回环访问；远程访问需 `ADMIN_TOKEN`。设置文件含上游密钥，权限 0600（Windows 上 chmod 不生效，依赖目录 ACL / 磁盘加密）。
+- 设置页能改上游地址，等价于 SSRF 入口：只给可信的人访问。
 
 ## 11. 发布与 CI（GitHub Actions）
 
@@ -498,13 +534,13 @@ toolcall-gateway/
 | --- | --- |
 | `pull_request` | 只跑测试（Node 20/22 矩阵、`npm test`、`npm run gate`、密钥扫描），不推镜像 |
 | push 到 `main` | 测试 → 构建并推送 `ghcr.io/<owner>/<repo>:latest` 与 `sha-xxxxxxx` → 镜像冒烟（起容器验 `/healthz` 与 `USER node`） |
-| push tag `v1.0.0` | 同上，并额外推送 `:v1.0.0`、`:1.0.0`、`:1.0` |
+| push tag `v1.1.0` | 同上，并额外推送 `:v1.1.0`、`:1.1.0`、`:1.0` |
 
-发布一个版本（本项目当前版本即 `v1.0.0`）：
+发布一个版本（本项目当前版本即 `v1.1.0`）：
 
 ```bash
-git tag v1.0.0
-git push origin v1.0.0     # 触发构建，产出 ghcr.io/<owner>/<repo>:v1.0.0
+git tag v1.1.0
+git push origin v1.1.0     # 触发构建，产出 ghcr.io/<owner>/<repo>:v1.1.0
 ```
 
 镜像为多架构（`linux/amd64` + `linux/arm64`），带 SBOM 与 provenance。GHCR 使用内置 `GITHUB_TOKEN`（`packages: write`），无需额外 secret。
@@ -514,8 +550,8 @@ git push origin v1.0.0     # 触发构建，产出 ghcr.io/<owner>/<repo>:v1.0.0
 ## 12. 维护者检查清单（发布前）
 
 ```bash
-npm test            # 51 项单元测试
-npm run gate        # 离线全量 gate（M0~M6 + M8 + M10）
+npm test            # 单元测试（含设置存储）
+npm run gate        # 离线全量 gate（M0~M6 + M8 + M10 + M11）
 npm run conformance # 35 项协议矩阵（mock 确定性）
 npm run e2e:codex   # Codex 形状（dry）
 ```

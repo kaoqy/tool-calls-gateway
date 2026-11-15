@@ -171,6 +171,15 @@ async function gateM10() {
   if (ok) console.log('GATE M10 PASS');
 }
 
+// ---------------------------------------------------------------- M11（应用内设置）
+async function gateM11() {
+  const unit = runNode('settings test', ['--test', 'test/settings.test.mjs']);
+  const admin = runNode('admin e2e', ['--test', 'test/admin.test.mjs']);
+  const ok = unit.ok && admin.ok;
+  record('M11', '应用内设置（UI + 热生效 + 鉴权）', ok, ok ? '8 单测 + 9 e2e' : '见上方输出');
+  if (ok) console.log('GATE M11 PASS');
+}
+
 const ALL = [
   ['M0', gateM0],
   ['M1', gateM1],
@@ -182,6 +191,7 @@ const ALL = [
   ['M8', gateM8],
   ['M9', gateM9],
   ['M10', gateM10],
+  ['M11', gateM11],
 ];
 
 async function main() {

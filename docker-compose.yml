@@ -11,6 +11,8 @@ services:
       - .env
     environment:
       PORT: "8787"
+    volumes:
+      - tcg-data:/app/data
     restart: unless-stopped
     healthcheck:
       test:
@@ -22,3 +24,6 @@ services:
       timeout: 5s
       start_period: 5s
       retries: 3
+
+volumes:
+  tcg-data:

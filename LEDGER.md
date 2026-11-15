@@ -27,6 +27,7 @@
 | **M8 协议健壮性补齐** | ✅ | 2026-11-15 09:10 +08 | G8：单测 51/51 + conformance dry 35/35 |
 | **M9 真实联调** | ⚠️ 已实测后受阻 | 2026-11-15 09:22 +08 | 09:10–09:22 真实端点全绿（e2e/conformance/hitrate 均 PASS）；09:24 起上游 403 人机验证，复跑转 SKIP |
 | **M10 Codex 形状** | ✅ | 2026-11-15 09:22 +08 | G10：dry PASS + live PASS（shell 命中） |
+| **M11 应用内设置** | ✅ | 2026-11-15 12:50 +08 | G11：8 存储单测 + 9 项 UI/热生效/鉴权 e2e 全绿 |
 | G0-docker 手动 | ✅ | 2026-11-15 12:11 +08 | **改由 GitHub Actions 验证**：run 43675461000 的 smoke job 真 build 镜像 + 起容器 /healthz + `USER node` 校验全通过 |
 | G6-docker 手动 | ✅ | 2026-11-15 12:11 +08 | 同一 CI：多架构镜像推 GHCR + 容器健康检查；本机仍无 docker，compose 起停由镜像冒烟等价覆盖 |
 | M7 真实上游联调 | ✅→⚠️ | 2026-11-15 09:22 +08 | 已跑通真实双轮循环；后续复跑被上游风控拦截（详见 M9） |
@@ -234,6 +235,19 @@
   - 请求形状：`model=gpt-5-codex`（`MODEL_MAP` → `deepseek-web-flash`）+ `stream:true` + `stream_options.include_usage:true` + `tools=[shell{command,workdir,timeout}]` + 2KB 级 Codex 风格 system
   - README 已补 `config.toml` 样例、支持/不支持矩阵（4.6 / 6.1）
 - 备注：`apply_patch` 自由文本工具被模型降级为自然语言/空正文，网关协议层未崩，脚本记 `KNOWN_UNSUPPORTED`。
+
+### M11（应用内设置，2026-11-15）
+
+- [x] G11 自动：`node --test test/settings.test.mjs test/admin.test.mjs`
+  - 存储单测 8 项：无文件时用 env / 密钥只回显 hint / update 覆盖 env 且 0600 原子落盘 / 空值取消覆盖 / `modelMap` 两种写法 / 非法输入不写盘 / 坏 JSON 容错 / 白名单校验
+  - e2e 9 项（真起两个 mock 上游 + 一个网关）：`/admin` 页面无外链资源 / 设置脱敏 / **PUT 改上游后下一个请求立刻打到新上游** / 非法配置 400 且不改生效值 / 未知字段 400 / `/admin/api/test` 候选配置测连通 / reset 回落 env / 设置文件只含覆盖项 / `ADMIN_TOKEN` 401→200
+  - `npm test`：**68/68**；`npm run gate`：`PASS (10/11 通过, 1 跳过)`，`GATE M11 PASS`
+- 设计要点：
+  - 优先级 **设置文件（UI） > 环境变量 > 默认值**；每个字段带来源标记，避免"到底谁生效"。
+  - 热生效：`createServer` 每请求取一次 `settings.get()`，改完立即对后续请求生效，不重启进程。
+  - 密钥只在保存时单向上行；任何响应/日志都只给 `sk-***abcd`。
+  - 设置页默认只允许回环；远程需 `ADMIN_TOKEN`（Bearer），并带 CSP/`x-frame-options` 头。
+  - 持久化到 `DATA_DIR/settings.json`（0600，tmp+rename 原子写）；Docker 侧加 `tcg-data:/app/data` 卷。
 
 ## 5. 未验证项汇总
 
