@@ -255,6 +255,33 @@
   - 同时修掉一个真实缺陷：模板字符串里的反斜杠转义把内联 JS 写坏（`'... \\'` → `'... \'`），页面白屏且不报错。新增 `test/ui.test.mjs`（3 项）做回归：内联脚本必须能 `new Function` 解析、不得引外部资源、关键控件 id 齐全。
   - 新增 `meta.adminMode` 字段，页面能区分「令牌保护 / 本机访问」。
 
+### M12（零配置部署：首次初始化 + 账号鉴权，2026-11-15）
+
+**需求**：部署前完全不需要任何环境变量；起容器后首次访问 `/admin` 创建管理员账号 + 配上游即可用。
+
+**实现**
+- 新增 `src/auth.mjs`：`scrypt`（N=16384,r=8,p=1）+ 每账号随机 salt，`timingSafeEqual` 比对；`auth.json` 0600 只存 `username/salt/hash/algo`，**不存明文**。
+- 会话：32 字节随机 token（`crypto.randomBytes`），**只存内存**；Cookie `tcg_sess` = `HttpOnly; SameSite=Lax; Path=/`，7 天，https 反代下自动加 `Secure`。改密码 → `revokeAll()`，其它浏览器立刻失效。
+- 登录节流：同来源 5 次失败锁 5 分钟，`429` + `Retry-After`；成功即清零。
+- 路由：`POST /admin/api/setup`（账号不存在时可调用，创建后 409）、`/admin/api/setup/test`（保存前探 `/v1/models`）、`/admin/api/session`、`/admin/api/login`（用户名+密码，或 `{token}`）、`/admin/api/logout`、`/admin/api/password`。
+- `/admin` 三种形态：未初始化 → **初始化向导**；已初始化但无会话 → **登录页**；有会话 → **控制台**（新增「账号」分区：改密码 / 退出）。
+- `GET /healthz` 增加 `setupRequired` / `upstreamConfigured`，部署脚本与 CI 用它判断状态。
+- **移除**「本机回环免登录」与「必须有 ADMIN_TOKEN」两条旧策略：现在唯一凭据是首次创建的管理员账号；`ADMIN_TOKEN` 降级为可选兜底（自动化 / 找回）。
+- `UPSTREAM_BASE_URL` 默认值改为空：未配置时 `/v1/*` 返回 `503 upstream_not_configured`（带"去 /admin"的提示），不再默默打向某个猜测地址。
+- 顺手修一个真实缺陷：`package.json` 被 PowerShell 5.1 写入时带上 UTF-8 BOM，导致 `packageVersion()` 静默返回空字符串（页面版本号显示成 `v`）。已去 BOM，并全仓扫描确认无其它 BOM。
+
+**Gate 结果（真跑）**
+| 项 | 结果 |
+| --- | --- |
+| `node --test test/auth.test.mjs` | **18/18**（哈希加盐/不落明文/409 防覆盖/改密/会话 TTL/撤销/节流/Cookie 属性/损坏文件容错） |
+| `node --test test/admin.test.mjs` | **16/16**（首次初始化向导 → 校验失败不建号 → 201+Cookie → 控制台 → 401 矩阵 → 热生效换上游 → 非法配置 → 连接测试/工具自检 → 退出 → 改密使旧会话失效 → 5 次失败 429 → ADMIN_TOKEN 兜底 → 落盘审计 → 重启后要求重新登录） |
+| `node --test test/ui.test.mjs` | **7/7**（三页内联 JS 可解析、关键 id、无内联事件、用户名转义） |
+| `npm test` | **96/96** |
+| `node scripts/gate.mjs` | `PASS (11/12 通过, 1 跳过)`，新增 M12 PASS；M0 的 `/healthz` 断言由"逐字节相等"改为字段断言（`status` + `setupRequired`） |
+| 浏览器实测（Chrome，真实点击） | 初始化向导填表 → 测试连接返回「HTTP 200 · 26ms · 1 个模型」并标注"需提示词模拟" → 完成初始化 → 控制台显示"账号登录 admin / v1.3.0 / 3 项覆盖" → 退出登录 → 登录页（用户名回填） |
+| 浏览器实测（零配置实例经网关） | `finish_reason=tool_calls`、`get_weather`、`{"city":"北京"}` |
+
+**未验证**：Docker 构建/容器内首次初始化 → 本机无 docker（WSL 无发行版）。改为在 CI 冒烟里真跑：零环境变量起容器 → 断言 `setupRequired:true` → 走完 setup → 重启验持久化 → 旧会话失效。复现见 `.github/workflows/docker-publish.yml` 的 `smoke` job。
 ## 5. 未验证项汇总
 
 | 项 | 状态 | 原因 | 复现命令 |
@@ -607,5 +634,6 @@ docker run -d --name toolcall-gateway -p 8787:8787 \
 | `v1.1.0` | `d2e37c5` | `43678360516` ⚠️ smoke 失败 | `sha256:f1b98ae8…` | 应用内设置初版。已知问题：Docker 端口映射下 `/admin` 返回 401（仅回环策略），**用 v1.1.1** |
 | `v1.1.1` | `9487663` | `43678695307` ✅ | `sha256:d1a377d6…` | 修复上述问题：`ADMIN_TOKEN` 登录 + HttpOnly Cookie；CI 冒烟覆盖 401/200 与 `deploy.sh` 语法 |
 | `v1.2.0` | `19d4339` | `43683536879` ✅ | `sha256:4eaa009e…` | 设置页 UI 重构（侧边栏/脏状态/模型表/接入信息）+ `test/ui.test.mjs` 回归防线；README 部署章节重写 |
+| `v1.3.0` | 待填 | 待填 | 待填 | **零配置部署**：去掉全部必需 env，首次访问 /admin 创建管理员 + 配上游；新增 `src/auth.mjs`（scrypt/会话/节流）+ 初始化向导 + 账号分区；未配上游时 /v1 明确 503 |
 
 镜像：`ghcr.io/kaoqy/tool-calls-gateway:{v1.1.1,1.1.1,1.1,latest,sha-*}`，平台 `linux/amd64` + `linux/arm64`。

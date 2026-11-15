@@ -1,16 +1,19 @@
 #!/usr/bin/env sh
-# 一键部署：拉取已发布镜像 → 生成/复用 .env → 起容器 → 等 /healthz 就绪
+# 一键部署：拉取已发布镜像 → 起容器 → 等 /healthz 就绪 → 打印下一步。
 #
 #   curl -fsSL https://raw.githubusercontent.com/kaoqy/tool-calls-gateway/main/deploy.sh | sh
 #   # 或本地：sh deploy.sh
 #
-# 可用环境变量覆盖：
-#   TCG_IMAGE    镜像地址（默认 ghcr.io/kaoqy/tool-calls-gateway:v1.2.0）
+# 全程无需任何环境变量：上游地址、密钥、管理员账号都在首次打开 /admin 时用网页填。
+# 唯一会持久化的是数据卷 tcg-data（user.role=node 可写 /app/data），容器重建不丢配置。
+#
+# 可选覆盖：
+#   TCG_IMAGE    镜像地址（默认 ghcr.io/kaoqy/tool-calls-gateway:v1.3.0）
 #   HOST_PORT    宿主端口（默认 8787）
 #   INSTALL_DIR  安装目录（默认 ./toolcall-gateway）
 set -eu
 
-IMAGE="${TCG_IMAGE:-ghcr.io/kaoqy/tool-calls-gateway:v1.2.0}"
+IMAGE="${TCG_IMAGE:-ghcr.io/kaoqy/tool-calls-gateway:v1.3.0}"
 PORT="${HOST_PORT:-8787}"
 DIR="${INSTALL_DIR:-./toolcall-gateway}"
 
@@ -22,7 +25,7 @@ if docker compose version >/dev/null 2>&1; then
 elif command -v docker-compose >/dev/null 2>&1; then
   COMPOSE="docker-compose"
 else
-  echo "需要 docker compose（或 docker-compose）"; exit 1
+  echo "需要 docker compose（或 docker-compose）；也可以只用 docker run，见 README"; exit 1
 fi
 
 echo "==> 镜像: $IMAGE"
@@ -31,50 +34,14 @@ echo "==> 端口: $PORT   目录: $DIR"
 mkdir -p "$DIR"
 cd "$DIR"
 
-# 1) 生成 .env（已存在则保留，不覆盖用户的密钥）
-if [ ! -f .env ]; then
-  printf '%s\n' \
-    "UPSTREAM_BASE_URL=https://api.deepseek.com" \
-    "UPSTREAM_API_KEY=" \
-    "DEFAULT_MODEL=deepseek-chat" \
-    "GATEWAY_API_KEY=" \
-    "ADMIN_TOKEN=" \
-    "TOOL_MODE=auto" \
-    "REASONING_PASSTHROUGH=on" \
-    "REQUEST_TIMEOUT_MS=60000" \
-    "MAX_BODY_BYTES=2097152" \
-    "LOG_LEVEL=info" \
-    > .env
-  echo "==> 已生成 .env，请填入 UPSTREAM_BASE_URL / UPSTREAM_API_KEY 后重新运行本脚本"
-  echo "    编辑：$DIR/.env"
-  echo "    然后再执行：sh deploy.sh"
-  exit 0
+# 1) 生成 compose 文件（只依赖镜像；如果用户自己放了 .env，一并注入，方便高级用法）
+ENV_FILE_BLOCK=""
+if [ -f .env ]; then
+  ENV_FILE_BLOCK='    env_file:
+      - .env'
+  echo "==> 检测到 .env，将作为可选环境变量注入容器"
 fi
 
-# 2) 校验必填项
-if ! grep -Eq '^UPSTREAM_BASE_URL=https?://' .env; then
-  echo "!! .env 里的 UPSTREAM_BASE_URL 未填写"; exit 1
-fi
-if ! grep -Eq '^UPSTREAM_API_KEY=.+' .env || grep -Eq '^UPSTREAM_API_KEY=sk-REPLACE_ME' .env; then
-  echo "!! .env 里的 UPSTREAM_API_KEY 未填写"; exit 1
-fi
-
-# 2.5) 设置页令牌：docker 端口映射下来源 IP 不是回环，必须有 ADMIN_TOKEN 才能打开 /admin
-if ! grep -Eq '^ADMIN_TOKEN=.+' .env; then
-  if [ -r /dev/urandom ]; then
-    TCG_ADMIN_TOKEN=$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')
-  else
-    TCG_ADMIN_TOKEN="tcg-$(date +%s)"
-  fi
-  awk -v tok="$TCG_ADMIN_TOKEN" '
-    /^ADMIN_TOKEN=/ { print "ADMIN_TOKEN=" tok; next }
-    { print }
-  ' .env > .env.tmp && mv .env.tmp .env
-  echo "==> 已生成设置页令牌：ADMIN_TOKEN=$TCG_ADMIN_TOKEN"
-  echo "    浏览器打开 http://127.0.0.1:$PORT/admin 输入该令牌（Cookie 24h 有效）"
-fi
-
-# 3) 写一份使用预构建镜像的 compose 文件
 cat > docker-compose.yml <<EOF
 services:
   toolcall-gateway:
@@ -82,10 +49,9 @@ services:
     container_name: toolcall-gateway
     ports:
       - "$PORT:8787"
-    env_file:
-      - .env
     environment:
       PORT: "8787"
+$ENV_FILE_BLOCK
     restart: unless-stopped
     read_only: true
     volumes:
@@ -109,25 +75,31 @@ volumes:
   tcg-data:
 EOF
 
-# 4) 拉取并启动
+# 2) 拉取并启动
 echo "==> 拉取镜像"
 $COMPOSE pull
 echo "==> 启动"
 $COMPOSE up -d
 
-# 5) 等健康检查
+# 3) 等健康检查（首次启动就要建数据卷，给足 60s）
 printf '==> 等待健康检查'
 i=0
-while [ "$i" -lt 30 ]; do
+while [ "$i" -lt 60 ]; do
   if body=$(curl -fsS "http://127.0.0.1:$PORT/healthz" 2>/dev/null); then
     printf '\n'
     echo "==> 就绪：$body"
+    echo
+    echo "下一步（一次性，完成后就不用再碰这些文件）："
+    echo "  1. 浏览器打开  http://127.0.0.1:$PORT/admin"
+    echo "     网页里创建管理员账号 + 填写上游 Base URL / API Key / 默认模型，保存即生效"
+    echo "  2. 把下游客户端指向  http://127.0.0.1:$PORT/v1"
     echo
     echo "OpenAI 兼容端点： http://127.0.0.1:$PORT/v1"
     echo "设置页：         http://127.0.0.1:$PORT/admin"
     echo "健康检查：       http://127.0.0.1:$PORT/healthz"
     echo "查看日志：       $COMPOSE logs -f"
     echo "停止：           $COMPOSE down"
+    echo "配置文件：       docker volume inspect ${DIR##*/}_tcg-data  （auth.json / settings.json）"
     exit 0
   fi
   printf '.'
@@ -135,6 +107,6 @@ while [ "$i" -lt 30 ]; do
   sleep 1
 done
 printf '\n'
-echo "!! 30s 内未就绪，最近日志："
+echo "!! 60s 内未就绪，最近日志："
 $COMPOSE logs --tail=50 || true
 exit 1

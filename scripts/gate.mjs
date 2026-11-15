@@ -56,7 +56,8 @@ async function checkHealthz() {
     await waitForHealth(`http://127.0.0.1:${port}/healthz`);
     const res = await requestJson(`http://127.0.0.1:${port}/healthz`);
     if (res.status !== 200) throw new Error(`/healthz 状态码 ${res.status}，期望 200`);
-    if (res.text !== '{"status":"ok"}') throw new Error(`/healthz body 为 ${res.text}，期望 {"status":"ok"}`);
+    if (res.json?.status !== 'ok') throw new Error(`/healthz body 为 ${res.text}，期望 status=ok`);
+    if (typeof res.json?.setupRequired !== 'boolean') throw new Error(`/healthz 缺少 setupRequired 布尔字段：${res.text}`);
     console.log(`  GET /healthz -> ${res.status} ${res.text}`);
     return true;
   } catch (err) {
@@ -174,10 +175,24 @@ async function gateM10() {
 // ---------------------------------------------------------------- M11（应用内设置）
 async function gateM11() {
   const unit = runNode('settings test', ['--test', 'test/settings.test.mjs']);
-  const admin = runNode('admin e2e', ['--test', 'test/admin.test.mjs']);
-  const ok = unit.ok && admin.ok;
-  record('M11', '应用内设置（UI + 热生效 + 鉴权）', ok, ok ? '8 单测 + 9 e2e' : '见上方输出');
+  const ui = runNode('ui test', ['--test', 'test/ui.test.mjs']);
+  const ok = unit.ok && ui.ok;
+  record('M11', '应用内设置（存储 / 校验 / 页面结构）', ok, ok ? '8 存储单测 + 7 页面单测' : '见上方输出');
   if (ok) console.log('GATE M11 PASS');
+}
+
+// ---------------------------------------------------------------- M12（零配置首次初始化 + 账号鉴权）
+async function gateM12() {
+  const unit = runNode('auth test', ['--test', 'test/auth.test.mjs']);
+  const e2e = runNode('admin e2e', ['--test', 'test/admin.test.mjs']);
+  const ok = unit.ok && e2e.ok;
+  record(
+    'M12',
+    '零配置部署：首次初始化 + 账号鉴权 + 热生效',
+    ok,
+    ok ? '18 鉴权单测 + 16 端到端（含重启/节流/改密）' : '见上方输出',
+  );
+  if (ok) console.log('GATE M12 PASS');
 }
 
 const ALL = [
@@ -192,6 +207,7 @@ const ALL = [
   ['M9', gateM9],
   ['M10', gateM10],
   ['M11', gateM11],
+  ['M12', gateM12],
 ];
 
 async function main() {

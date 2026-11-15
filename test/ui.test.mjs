@@ -2,7 +2,7 @@
 // （曾经因为模板字符串反斜杠转义把内联 JS 写坏过一次，这里做回归防线。）
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { renderAdminHtml, renderLoginHtml } from '../src/admin-ui.mjs';
+import { renderAdminHtml, renderLoginHtml, renderSetupHtml } from '../src/admin-ui.mjs';
 
 function inlineScripts(html) {
   const out = [];
@@ -42,6 +42,12 @@ test('设置页：关键控件 id 齐全（测试与用户脚本都依赖它们�
     'btn-models',
     'btn-tool',
     'btn-logout',
+    'btn-logout-2',
+    'btn-passwd',
+    'acc-username',
+    'acc-current',
+    'acc-new',
+    'chip-user-text',
     'models-box',
     'tool-box',
     'toasts',
@@ -52,13 +58,55 @@ test('设置页：关键控件 id 齐全（测试与用户脚本都依赖它们�
   assert.ok(html.includes('/admin/api/settings'));
 });
 
-test('登录页：内联 JS 能解析，含令牌输入框与错误位', () => {
+test('登录页：内联 JS 能解析，含用户名/口令与令牌兜底', () => {
   const html = renderLoginHtml({ version: '1.1.1' });
   const scripts = inlineScripts(html);
   assert.equal(scripts.length, 1);
   assert.doesNotThrow(() => new Function(scripts[0]));
-  assert.ok(html.includes('id="token"'));
-  assert.ok(html.includes('id="err"'));
+  for (const id of ['username', 'password', 'token', 'err', 'err2', 'f', 'ft']) {
+    assert.ok(html.includes(`id="${id}"`), `缺少 id=${id}`);
+  }
   assert.ok(html.includes('/admin/api/login'));
+  assert.ok(html.includes('ADMIN_TOKEN'), '应保留令牌兜底入口');
   assert.equal(/<script[^>]+src=/i.test(html), false);
+});
+
+test('初始化向导：内联 JS 能解析，两步字段齐全且无外链', () => {
+  const html = renderSetupHtml({ version: '1.1.1' });
+  const scripts = inlineScripts(html);
+  assert.equal(scripts.length, 1);
+  assert.doesNotThrow(() => new Function(scripts[0]));
+  for (const id of [
+    'username',
+    'password',
+    'password2',
+    'upstreamBaseUrl',
+    'upstreamApiKey',
+    'defaultModel',
+    'btn-test',
+    'btn-submit',
+    'err',
+    'models',
+    'test-state',
+  ]) {
+    assert.ok(html.includes(`id="${id}"`), `缺少 id=${id}`);
+  }
+  assert.ok(html.includes('/admin/api/setup'), '要提交到 setup 接口');
+  assert.ok(html.includes('/admin/api/setup/test'), '要有保存前的连接测试');
+  assert.ok(html.includes('完成初始化'));
+  assert.equal(/<script[^>]+src=/i.test(html), false);
+  assert.equal(/<link[^>]+href=["']https?:/i.test(html), false);
+});
+
+test('三个页面都不含内联事件处理器（CSP 只放行 false 时也不至于全挂）', () => {
+  for (const html of [renderAdminHtml({}), renderLoginHtml({}), renderSetupHtml({})]) {
+    assert.equal(/\son(click|submit|change|input)\s*=/i.test(html), false, '应使用 addEventListener 而不是内联事件');
+  }
+});
+
+test('登录页把用户名回填进输入框（避免每次手打），且做 HTML 转义', () => {
+  const html = renderLoginHtml({ username: 'admin' });
+  assert.match(html, /id="username"[^>]*value="admin"/);
+  const escaped = renderLoginHtml({ username: '"><script>x</script>' });
+  assert.equal(escaped.includes('<script>x</script>'), false, '用户名必须转义');
 });

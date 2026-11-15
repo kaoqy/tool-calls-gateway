@@ -49,7 +49,7 @@ jobs:
       - name: 单元测试
         run: npm test
 
-      - name: 全量离线 gate（M0~M6 + M8 + M10）
+      - name: 全量离线 gate（M0~M6 + M8 + M10~M12）
         run: npm run gate
 
       - name: 密钥泄漏扫描（只匹配真实 key 形态，避免误报测试用假值）
@@ -125,7 +125,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   smoke:
-    name: 镜像冒烟（build + /healthz）
+    name: 镜像冒烟（零配置起容器 + 首次初始化）
     needs: docker
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
@@ -135,35 +135,95 @@ jobs:
       - name: 本地构建 amd64 镜像
         run: docker build -t toolcall-gateway:smoke .
 
-      - name: 起容器并验证 /healthz、非 root 用户与设置页
+      - name: 零配置起容器（不给任何环境变量）
         run: |
           set -eu
           docker run -d --name tc-smoke -p 8787:8787 \
-            -e UPSTREAM_BASE_URL=https://example.com \
-            -e UPSTREAM_API_KEY=sk-smoke-test-only \
-            -e ADMIN_TOKEN=smoke-admin-token \
+            -v tc-smoke-data:/app/data \
             toolcall-gateway:smoke
           ok=""
-          for i in $(seq 1 30); do
+          for i in $(seq 1 40); do
             if body=$(curl -fsS http://127.0.0.1:8787/healthz 2>/dev/null); then ok="$body"; break; fi
             sleep 1
           done
           echo "healthz=$ok"
-          test "$ok" = '{"status":"ok"}'
+          echo "$ok" | grep -q '"status":"ok"'
+          echo "$ok" | grep -q '"setupRequired":true'
+          echo "$ok" | grep -q '"upstreamConfigured":false'
+
+      - name: 非 root 运行
+        run: |
+          set -eu
           user=$(docker inspect --format '{{.Config.User}}' toolcall-gateway:smoke)
           echo "container user=$user"
           test "$user" = "node"
+          touch_ok=$(docker exec tc-smoke node -e "require('node:fs').writeFileSync('/app/data/.probe','x');console.log('writable')")
+          echo "data dir: $touch_ok"
+          test "$touch_ok" = "writable"
 
-          # 设置了 ADMIN_TOKEN：未带令牌必须 401，带令牌能拿到设置页与设置 API
-          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8787/admin)
-          echo "admin without token -> $code"
+      - name: 未初始化时：/admin 是初始化向导，/v1 明确 503
+        run: |
+          set -eu
+          code=$(curl -s -o /tmp/setup.html -w '%{http_code}' http://127.0.0.1:8787/admin)
+          echo "admin -> $code"
+          test "$code" = "200"
+          grep -q '完成初始化' /tmp/setup.html
+          grep -q 'id="upstreamBaseUrl"' /tmp/setup.html
+
+          body=$(curl -s -X POST http://127.0.0.1:8787/v1/chat/completions \
+            -H 'content-type: application/json' \
+            -d '{"model":"x","messages":[{"role":"user","content":"hi"}]}')
+          echo "v1 -> $body"
+          echo "$body" | grep -q 'upstream_not_configured'
+
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8787/admin/api/settings)
+          echo "settings without session -> $code"
           test "$code" = "401"
-          curl -fsS -H 'Authorization: Bearer smoke-admin-token' http://127.0.0.1:8787/admin | grep -q 'id="upstreamBaseUrl"'
-          curl -fsS -H 'Authorization: Bearer smoke-admin-token' http://127.0.0.1:8787/admin/api/settings | grep -q '"sources"'
 
-          docker logs tc-smoke | tail -n 20
+      - name: 首次初始化：网页创建管理员 + 配上游（全走 HTTP，不需要 env）
+        run: |
+          set -eu
+          code=$(curl -s -c /tmp/cookies.txt -o /tmp/setup.json -w '%{http_code}' \
+            -X POST http://127.0.0.1:8787/admin/api/setup \
+            -H 'content-type: application/json' \
+            -d '{"username":"admin","password":"smoke-test-password","upstreamBaseUrl":"https://example.com","upstreamApiKey":"sk-smoke-not-real","defaultModel":"smoke-model"}')
+          echo "setup -> $code"
+          test "$code" = "201"
+          grep -q 'tcg_sess' /tmp/cookies.txt
+          grep -q '"username":"admin"' /tmp/setup.json
+          if grep -q 'sk-smoke-not-real' /tmp/setup.json; then echo "::error::响应回显了上游明文密钥"; exit 1; fi
+
+          curl -fsS http://127.0.0.1:8787/healthz | grep -q '"setupRequired":false'
+          curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8787/admin | grep -q 'id="modelMap"'
+          curl -fsS -b /tmp/cookies.txt http://127.0.0.1:8787/admin/api/settings | grep -q '"sources"'
+
+          # 再次初始化必须 409（窗口已关闭）
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8787/admin/api/setup \
+            -H 'content-type: application/json' \
+            -d '{"username":"hacker","password":"hacker-password","upstreamBaseUrl":"https://evil.example"}')
+          echo "second setup -> $code"
+          test "$code" = "409"
+
+      - name: 重启后配置仍在（数据卷持久化），且要求重新登录
+        run: |
+          set -eu
           docker rm -f tc-smoke
+          docker run -d --name tc-smoke -p 8787:8787 -v tc-smoke-data:/app/data toolcall-gateway:smoke
+          for i in $(seq 1 40); do
+            if body=$(curl -fsS http://127.0.0.1:8787/healthz 2>/dev/null); then break; fi
+            sleep 1
+          done
+          echo "healthz after restart=$body"
+          echo "$body" | grep -q '"setupRequired":false'
+          echo "$body" | grep -q '"upstreamConfigured":true'
+          code=$(curl -s -o /dev/null -w '%{http_code}' -b /tmp/cookies.txt http://127.0.0.1:8787/admin/api/settings)
+          echo "old session after restart -> $code"
+          test "$code" = "401"
+          curl -fsS http://127.0.0.1:8787/admin | grep -q '登录'
+          docker logs tc-smoke | tail -n 20
 
-      - name: 失败时输出容器日志
-        if: failure()
-        run: docker logs tc-smoke || true
+      - name: 清理
+        if: always()
+        run: |
+          docker rm -f tc-smoke || true
+          docker volume rm tc-smoke-data || true

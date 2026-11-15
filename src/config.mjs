@@ -73,8 +73,8 @@ export function loadConfig(env = process.env) {
   const reasoning = String(env.REASONING_PASSTHROUGH ?? 'on').trim().toLowerCase();
   return Object.freeze({
     port: toInt(env.PORT, DEFAULT_PORT),
-    // 只保留 scheme://host[:port] 部分由调用方拼 /v1/...；允许带 /v1 后缀的写法
-    upstreamBaseUrl: trimTrailingSlash(env.UPSTREAM_BASE_URL ?? 'https://api.deepseek.com'),
+    // 零配置部署：默认不指向任何上游，必须在 /admin 首次配置（或显式给 env）
+    upstreamBaseUrl: trimTrailingSlash(env.UPSTREAM_BASE_URL ?? ''),
     upstreamApiKey: env.UPSTREAM_API_KEY ?? '',
     defaultModel: env.DEFAULT_MODEL ?? '',
     toolMode: toolMode === 'off' ? 'off' : 'auto',
@@ -89,9 +89,11 @@ export function loadConfig(env = process.env) {
     liveModel: (env.LIVE_MODEL ?? '').trim() || DEFAULT_LIVE_MODEL,
     maxLiveCalls: toInt(env.MAX_LIVE_CALLS, DEFAULT_MAX_LIVE_CALLS) || DEFAULT_MAX_LIVE_CALLS,
     // ---- 第三轮新增：应用内设置 ----
-    adminToken: (env.ADMIN_TOKEN ?? '').trim(), // 设置后 /admin 需要 Bearer；不设则只允许本机回环访问
+    // 可选：给自动化/找回用的一次性令牌（用 Bearer 访问 /admin）。正常使用不需要它。
+    adminToken: (env.ADMIN_TOKEN ?? '').trim(),
     dataDir: (env.DATA_DIR ?? '').trim() || 'data',
     settingsFile: (env.SETTINGS_FILE ?? '').trim(), // 可选：直接指定 settings.json 路径
+    authFile: (env.AUTH_FILE ?? '').trim(), // 可选：直接指定 auth.json 路径
   });
 }
 

@@ -152,7 +152,194 @@ const COMMON_CSS = `
   }
 `;
 
-export function renderLoginHtml({ version = '' } = {}) {
+/** 首次运行：创建管理员 + 填上游，一个页面两步搞定 */
+export function renderSetupHtml({ version = '' } = {}) {
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>toolcall-gateway · 初始化</title>
+<style>${COMMON_CSS}
+  body{display:block;padding:32px 18px 56px}
+  .wizard{width:min(760px,100%);margin:0 auto;display:grid;gap:16px}
+  .hero{display:grid;gap:10px;margin-bottom:4px}
+  .hero .brand{margin:0}
+  .hero h1{font-size:22px;margin:6px 0 0;font-weight:680;letter-spacing:-.2px}
+  .hero p{margin:0;color:var(--muted);font-size:13.5px;max-width:62ch}
+  .steps{display:flex;gap:8px;flex-wrap:wrap;margin-top:6px}
+  .step{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--muted)}
+  .step .n{width:19px;height:19px;border-radius:50%;display:grid;place-items:center;background:var(--panel-2);border:1px solid var(--line);font-size:11px}
+  .step.done .n{background:var(--ok-soft);border-color:rgba(63,185,80,.4);color:var(--ok)}
+  .card>header .n{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;background:var(--accent-soft);color:var(--accent);font-size:11px;font-weight:700;border:1px solid rgba(91,140,255,.35)}
+  .card .body{padding-top:14px}
+  .form{display:grid;gap:14px}
+  .lbl{display:grid;gap:6px;font-size:13px;color:var(--muted)}
+  .lbl .tip{font-size:11.5px;color:var(--faint)}
+  .err{color:var(--err);font-size:12.5px;min-height:1.2em}
+  .foot{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:4px}
+  .foot .spacer{flex:1}
+  .notice{border:1px solid rgba(210,153,34,.3);background:var(--warn-soft);color:var(--warn);border-radius:10px;padding:10px 13px;font-size:12.5px;line-height:1.55}
+  .ok-notice{border-color:rgba(63,185,80,.3);background:var(--ok-soft);color:var(--ok)}
+</style>
+</head>
+<body>
+<form class="wizard" id="f" autocomplete="off">
+  <div class="hero">
+    <div class="brand"><span class="logo" aria-hidden="true"></span><span class="pill">首次初始化</span><span class="pill">v${version}</span></div>
+    <h1>两步就能用起来</h1>
+    <p>这里创建的管理员账号用来登录本设置页；上游是真正提供聊天的 OpenAI 兼容接口。保存后立即生效，无需重启。</p>
+    <div class="steps">
+      <span class="step" id="s1"><span class="n">1</span>管理员账号</span>
+      <span class="step" id="s2"><span class="n">2</span>上游接口</span>
+    </div>
+  </div>
+
+  <section class="card">
+    <header><span class="n">1</span><h2>管理员账号</h2><span class="sub">只用于登录这个设置页</span></header>
+    <div class="body">
+      <div class="form">
+        <label class="lbl">用户名
+          <input id="username" type="text" spellcheck="false" placeholder="admin" autocomplete="username" autofocus>
+          <span class="tip">2~32 位，字母/数字/下划线/点/中划线/@/中文</span>
+        </label>
+        <label class="lbl">密码
+          <span class="secret">
+            <input id="password" type="password" placeholder="至少 8 位" autocomplete="new-password">
+            <button type="button" class="reveal" data-for="password">显示</button>
+          </span>
+        </label>
+        <label class="lbl">确认密码
+          <input id="password2" type="password" placeholder="再输一次" autocomplete="new-password">
+        </label>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <header><span class="n">2</span><h2>上游接口</h2><span class="sub">兼容 OpenAI /v1/chat/completions 的纯聊天接口</span></header>
+    <div class="body">
+      <div class="form">
+        <label class="lbl">Base URL
+          <input id="upstreamBaseUrl" type="text" spellcheck="false" placeholder="https://api.deepseek.com 或 https://host/v1">
+          <span class="tip">可以带 <code>/v1</code> 后缀，网关不会拼成 <code>/v1/v1</code></span>
+        </label>
+        <label class="lbl">API Key
+          <span class="secret">
+            <input id="upstreamApiKey" type="password" placeholder="sk-..." autocomplete="off">
+            <button type="button" class="reveal" data-for="upstreamApiKey">显示</button>
+          </span>
+          <span class="tip">只存在本机 <code>data/settings.json</code>，不写日志、不回显</span>
+        </label>
+        <label class="lbl">默认模型
+          <input id="defaultModel" type="text" spellcheck="false" placeholder="deepseek-chat">
+          <span class="tip">客户端送什么模型名都会映射到它；也可以稍后在设置页配映射</span>
+        </label>
+        <div class="row">
+          <button class="btn" type="button" id="btn-test">测试连接</button>
+          <span class="muted" style="font-size:12px" id="test-state">先填好上面三项，再点这里探一次 <code>/v1/models</code></span>
+        </div>
+        <div id="models" class="models" style="display:none"></div>
+      </div>
+    </div>
+  </section>
+
+  <div class="err" id="err" role="alert"></div>
+  <div class="foot">
+    <button class="btn primary" type="submit" id="btn-submit">完成初始化</button>
+    <span class="muted" style="font-size:12px">完成后会在本机写入 <code>data/auth.json</code> 与 <code>data/settings.json</code></span>
+    <span class="spacer"></span>
+    <span class="muted" style="font-size:11.5px">Cookie · HttpOnly · SameSite=Lax</span>
+  </div>
+  <div class="notice" id="claim">首次初始化的窗口：在你完成之前，任何能访问该端口的客户端都能创建这个账号。完成后窗口即关闭；如需彻底锁死，请先给容器设置 <code>ADMIN_TOKEN</code> 并只在本机打开。</div>
+</form>
+<script>
+const $ = (id) => document.getElementById(id);
+const testState = (text, ok) => { const el = $('test-state'); el.textContent = text; el.style.color = ok ? 'var(--ok)' : 'var(--muted)'; };
+document.querySelectorAll('.reveal').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const input = $(btn.dataset.for);
+    input.type = input.type === 'password' ? 'text' : 'password';
+    btn.textContent = input.type === 'password' ? '显示' : '隐藏';
+  });
+});
+async function postJson(url, body) {
+  const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const data = await res.json().catch(() => null);
+  if (!res.ok) {
+    const msg = (data && data.error && data.error.message) || ('HTTP ' + res.status);
+    const err = new Error(msg);
+    err.payload = data;
+    throw err;
+  }
+  return data;
+}
+function upstreamPatch() {
+  return {
+    upstreamBaseUrl: $('upstreamBaseUrl').value.trim(),
+    upstreamApiKey: $('upstreamApiKey').value.trim(),
+    defaultModel: $('defaultModel').value.trim(),
+  };
+}
+$('btn-test').addEventListener('click', async () => {
+  const patch = upstreamPatch();
+  if (!patch.upstreamBaseUrl) { testState('请先填 Base URL', false); return; }
+  const btn = $('btn-test');
+  btn.disabled = true; btn.innerHTML = '<span class="spin"></span>探测中';
+  testState('正在请求 /v1/models …', false);
+  try {
+    const data = await postJson('/admin/api/setup/test', { settings: patch });
+    testState('连接正常 · HTTP ' + data.status + ' · ' + data.latencyMs + 'ms · ' + data.models.length + ' 个模型', true);
+    const box = $('models');
+    box.style.display = '';
+    if (!data.models.length) { box.innerHTML = '<div class="item muted">接口没返回模型列表，可手动填写默认模型</div>'; return; }
+    box.innerHTML = '<div class="head"><span>模型</span><span>工具调用</span><span></span></div>' + data.models.slice(0, 50).map((m) => {
+      const native = m.supports_tool_call === true;
+      const tag = native ? '<span class="tag ok">原生支持</span>' : '<span class="tag warn">需提示词模拟</span>';
+      return '<div class="item"><span class="id">' + m.id + '</span>' + tag + '<button type="button" class="btn ghost" style="padding:4px 9px;font-size:12px" data-model="' + m.id + '">用这个</button></div>';
+    }).join('');
+  } catch (ex) {
+    testState('失败：' + ex.message, false);
+  } finally {
+    btn.disabled = false; btn.textContent = '测试连接';
+  }
+});
+$('models').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-model]');
+  if (!btn) return;
+  $('defaultModel').value = btn.dataset.model;
+  testState('已选默认模型：' + btn.dataset.model, true);
+});
+$('f').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const err = $('err');
+  err.textContent = '';
+  const username = $('username').value.trim();
+  const password = $('password').value;
+  const password2 = $('password2').value;
+  if (!username) { err.textContent = '请填写用户名'; return; }
+  if (password.length < 8) { err.textContent = '密码至少 8 位'; return; }
+  if (password !== password2) { err.textContent = '两次输入的密码不一致'; return; }
+  const patch = upstreamPatch();
+  if (!patch.upstreamBaseUrl) { err.textContent = '请填写上游 Base URL'; return; }
+  if (!patch.defaultModel) { err.textContent = '请填写默认模型（可先点测试连接挑一个）'; return; }
+  const btn = $('btn-submit');
+  btn.disabled = true; btn.innerHTML = '<span class="spin"></span>创建中';
+  try {
+    await postJson('/admin/api/setup', { username, password, ...patch });
+    $('s1').classList.add('done'); $('s2').classList.add('done');
+    location.href = '/admin';
+  } catch (ex) {
+    err.textContent = ex.message;
+    btn.disabled = false; btn.textContent = '完成初始化';
+  }
+});
+</script>
+</body>
+</html>`;
+}
+
+export function renderLoginHtml({ version = '', username = '' } = {}) {
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -161,32 +348,49 @@ export function renderLoginHtml({ version = '' } = {}) {
 <title>toolcall-gateway · 登录</title>
 <style>${COMMON_CSS}
   body{display:grid;place-items:center;min-height:100dvh;padding:24px}
-  .login{width:min(400px,100%);background:var(--panel);border:1px solid var(--line);border-radius:18px;box-shadow:var(--shadow);padding:28px}
+  .login{width:min(410px,100%);background:var(--panel);border:1px solid var(--line);border-radius:18px;box-shadow:var(--shadow);padding:28px}
   .login .brand{margin-bottom:6px}
   .login h1{font-size:18px;margin:14px 0 6px}
   .login p{margin:0 0 18px;color:var(--muted);font-size:13px}
   .login form{display:grid;gap:12px}
+  .login label{display:grid;gap:6px;font-size:12.5px;color:var(--muted)}
   .login .foot{display:flex;justify-content:space-between;align-items:center;margin-top:16px;color:var(--faint);font-size:11.5px}
   .err{color:var(--err);font-size:12.5px;min-height:1.3em}
+  details summary{cursor:pointer;color:var(--faint);font-size:12px;margin-top:4px}
+  details form{display:grid;gap:8px;margin-top:10px}
 </style>
 </head>
 <body>
   <div class="login">
     <div class="brand"><span class="logo"></span><span class="pill">管理设置</span></div>
-    <h1>toolcall-gateway 设置</h1>
-    <p>该实例已启用 <code>ADMIN_TOKEN</code>。输入令牌后会在本机保存 24 小时登录状态。</p>
-    <form id="f">
-      <div class="secret">
-        <input id="token" type="password" placeholder="ADMIN_TOKEN" autocomplete="current-password" autofocus aria-label="ADMIN_TOKEN">
-        <button type="button" class="reveal" data-for="token">显示</button>
-      </div>
+    <h1>登录 toolcall-gateway 设置</h1>
+    <p>使用首次初始化时创建的管理员账号。<span id="who"></span></p>
+    <form id="f" autocomplete="on">
+      <label>用户名
+        <input id="username" type="text" autocomplete="username" spellcheck="false" value="${escapeAttr(username)}">
+      </label>
+      <label>密码
+        <span class="secret">
+          <input id="password" type="password" autocomplete="current-password" autofocus>
+          <button type="button" class="reveal" data-for="password">显示</button>
+        </span>
+      </label>
       <div class="err" id="err" role="alert"></div>
       <button class="btn primary" type="submit" style="justify-content:center">登录</button>
     </form>
-    <div class="foot"><span>Cookie · HttpOnly · SameSite=Lax</span><span>v${version}</span></div>
+    <details>
+      <summary>用 ADMIN_TOKEN 登录（自动化 / 找回）</summary>
+      <form id="ft">
+        <input id="token" type="password" placeholder="ADMIN_TOKEN" autocomplete="off" aria-label="ADMIN_TOKEN">
+        <div class="err" id="err2" role="alert"></div>
+        <button class="btn" type="submit" style="justify-content:center">用令牌登录</button>
+      </form>
+    </details>
+    <div class="foot"><span>忘记密码：删除 data/auth.json 后重启即可重新初始化</span><span>v${version}</span></div>
   </div>
 <script>
 const $ = (id) => document.getElementById(id);
+if ($('username').value) $('who').textContent = '';
 document.querySelectorAll('.reveal').forEach((btn) => {
   btn.addEventListener('click', () => {
     const input = $(btn.dataset.for);
@@ -194,32 +398,40 @@ document.querySelectorAll('.reveal').forEach((btn) => {
     btn.textContent = input.type === 'password' ? '显示' : '隐藏';
   });
 });
-$('f').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const err = $('err');
-  err.textContent = '';
-  const token = $('token').value.trim();
-  if (!token) { err.textContent = '请输入令牌'; return; }
+async function post(url, body, errEl) {
+  errEl.textContent = '';
   try {
-    const res = await fetch('/admin/api/login', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ token }),
-    });
+    const res = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
     if (!res.ok) {
       const j = await res.json().catch(() => null);
-      err.textContent = (j && j.error && j.error.message) || ('登录失败：HTTP ' + res.status);
-      return;
+      errEl.textContent = (j && j.error && j.error.message) || ('登录失败：HTTP ' + res.status);
+      return false;
     }
     location.reload();
-  } catch (ex) { err.textContent = '网络错误：' + ex.message; }
+    return true;
+  } catch (ex) {
+    errEl.textContent = '网络错误：' + ex.message;
+    return false;
+  }
+}
+$('f').addEventListener('submit', (e) => {
+  e.preventDefault();
+  post('/admin/api/login', { username: $('username').value.trim(), password: $('password').value }, $('err'));
+});
+$('ft').addEventListener('submit', (e) => {
+  e.preventDefault();
+  post('/admin/api/login', { token: $('token').value.trim() }, $('err2'));
 });
 </script>
 </body>
 </html>`;
 }
 
-export function renderAdminHtml({ version = '' } = {}) {
+function escapeAttr(value) {
+  return String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+export function renderAdminHtml({ version = '', username = '' } = {}) {
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -237,6 +449,7 @@ export function renderAdminHtml({ version = '' } = {}) {
   </div>
   <div class="topmeta">
     <span class="chip" id="chip-admin"><span class="dot"></span><span id="chip-admin-text">…</span></span>
+    <span class="chip" id="chip-user"><span class="dot"></span><span id="chip-user-text">${escapeAttr(username)}</span></span>
     <span class="fileline" id="file" title=""></span>
     <button class="link" id="btn-logout">退出登录</button>
   </div>
@@ -258,6 +471,7 @@ export function renderAdminHtml({ version = '' } = {}) {
       <a href="#gateway">网关</a>
       <a href="#selftest">自检</a>
       <a href="#about">接入</a>
+      <a href="#account">账号</a>
     </nav>
   </aside>
 
@@ -390,6 +604,29 @@ export function renderAdminHtml({ version = '' } = {}) {
         <div class="pre" id="curl-example"></div>
         <div class="row" style="margin-top:10px"><button class="btn ghost" data-copy="curl-example">复制 curl</button></div>
         <p class="hint" style="margin-top:14px">Python / Node SDK 的 <code>base_url</code> 填上面的 Base URL，<code>api_key</code> 填「下游鉴权 Key」（未设置时随便填一个非空值）。</p>
+      </div>
+    </section>
+
+    <section class="card" id="account">
+      <header><h2>账号</h2><span class="chip sm" id="acc-mode"></span><span class="sub">设置页的登录凭据</span></header>
+      <div class="body">
+        <div class="field">
+          <div class="flabel"><span>当前账号</span></div>
+          <div class="control"><input id="acc-username" type="text" readonly></div>
+        </div>
+        <div class="field">
+          <div class="flabel"><span>改密码</span></div>
+          <div class="control row" style="gap:8px;flex-wrap:wrap">
+            <input id="acc-current" type="password" placeholder="当前密码" autocomplete="current-password" style="max-width:220px">
+            <input id="acc-new" type="password" placeholder="新密码（≥8 位）" autocomplete="new-password" style="max-width:220px">
+            <button class="btn" id="btn-passwd" type="button">更新密码</button>
+          </div>
+          <p class="hint">改完密码后，其它浏览器上的登录会话会全部失效。忘记密码可在服务器上删除 <code>data/auth.json</code> 后重启，重新走初始化。</p>
+        </div>
+        <div class="field">
+          <div class="flabel"><span>退出</span></div>
+          <div class="control"><button class="btn ghost danger" type="button" id="btn-logout-2">退出登录</button></div>
+        </div>
       </div>
     </section>
   </main>
@@ -540,8 +777,13 @@ export function renderAdminHtml({ version = '' } = {}) {
     $('file').textContent = meta.file ? (meta.file + (meta.exists ? '' : '（尚未创建）')) : '';
     $('file').title = meta.file || '';
     $('ver').textContent = meta.version ? 'v' + meta.version : '';
-    $('chip-admin-text').textContent = meta.adminMode === 'token' ? '令牌保护' : '本机访问';
-    $('chip-admin').className = 'chip ' + (meta.adminMode === 'token' ? 'file' : 'ok');
+    var mode = meta.adminMode || 'account';
+    $('chip-admin-text').textContent = mode === 'token-or-account' ? '账号登录 · 令牌可用' : '账号登录';
+    $('chip-admin').className = 'chip ' + (mode === 'token-or-account' ? 'file' : 'ok');
+    var acct = (data.account || {});
+    $('chip-user-text').textContent = acct.username || '已登录';
+    $('acc-username').value = acct.username || '';
+    $('acc-mode').textContent = meta.tokenEnabled ? 'ADMIN_TOKEN 也有效' : '仅账号密码';
 
     var host = '';
     try { host = new URL(s.upstreamBaseUrl).host; } catch (e) { host = s.upstreamBaseUrl || '—'; }
@@ -655,6 +897,19 @@ export function renderAdminHtml({ version = '' } = {}) {
     try { await api('/admin/api/logout', { method: 'POST', body: {} }); } catch (e) {}
     location.reload();
   };
+  $('btn-logout-2').onclick = $('btn-logout').onclick;
+
+  $('btn-passwd').onclick = withBusy($('btn-passwd'), async function () {
+    var current = $('acc-current').value;
+    var next = $('acc-new').value;
+    if (!current) { toast('请输入当前密码', 'err'); return; }
+    if (next.length < 8) { toast('新密码至少 8 位', 'err'); return; }
+    var data = await api('/admin/api/password', { method: 'POST', body: { currentPassword: current, newPassword: next } });
+    $('acc-current').value = '';
+    $('acc-new').value = '';
+    applyView(data);
+    toast('密码已更新，其它设备的登录已失效', 'ok');
+  });
 
   document.querySelectorAll('.reveal').forEach(function (btn) {
     btn.addEventListener('click', function () {

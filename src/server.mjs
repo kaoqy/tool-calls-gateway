@@ -10,7 +10,19 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { config as defaultConfig, resolveModel } from './config.mjs';
 import { logger as defaultLogger } from './logger.mjs';
 import { createSettingsStore, normalizePatch } from './settings.mjs';
-import { renderAdminHtml, renderLoginHtml } from './admin-ui.mjs';
+import { renderAdminHtml, renderLoginHtml, renderSetupHtml } from './admin-ui.mjs';
+import {
+  AuthError,
+  SESSION_COOKIE,
+  clearCookie,
+  createAuthStore,
+  createLoginLimiter,
+  createSessionStore,
+  DEFAULT_SESSION_TTL_MS,
+  isSecureRequest,
+  readCookie,
+  sessionCookie,
+} from './auth.mjs';
 import {
   callUpstreamGet,
   callUpstreamJson,
@@ -101,15 +113,27 @@ async function pipeUpstreamStream(res, opened, logger) {
   }
 }
 
-export function createServer({ settings, config = defaultConfig, logger = defaultLogger } = {}) {
+export function createServer({ settings, config = defaultConfig, logger = defaultLogger, auth, sessions, limiter } = {}) {
   // 有 settings 时每个请求都取最新配置（UI 保存后立即热生效，无需重启）
   const getConfig = typeof settings?.get === 'function' ? () => settings.get() : () => config;
+  const active = getConfig();
+  const authStore =
+    auth ??
+    createAuthStore({
+      filePath: path.resolve(active.authFile || path.join(active.dataDir, 'auth.json')),
+      logger,
+    });
+  const sessionStore = sessions ?? createSessionStore({ ttlMs: DEFAULT_SESSION_TTL_MS });
+  const loginLimiter = limiter ?? createLoginLimiter({});
+  const ctx = { getConfig, settings, logger, auth: authStore, sessions: sessionStore, limiter: loginLimiter };
   const server = http.createServer((req, res) => {
-    handleRequest(req, res, { getConfig, settings, logger }).catch((err) => {
+    handleRequest(req, res, ctx).catch((err) => {
       logger.error('unhandled request error', { message: err?.message ?? String(err) });
       sendError(res, 500, 'internal_error', '网关内部错误');
     });
   });
+  server.adminState = () => authStore.summary();
+  server.sessions = sessionStore;
   return server;
 }
 
@@ -123,108 +147,223 @@ function rejectUnauthorized(req, res, config) {
   return true;
 }
 
-function readCookie(req, name) {
-  const raw = String(req.headers.cookie ?? '');
-  for (const part of raw.split(';')) {
-    const idx = part.indexOf('=');
-    if (idx === -1) continue;
-    const key = part.slice(0, idx).trim();
-    if (key === name) {
-      const value = part.slice(idx + 1).trim();
-      try {
-        return decodeURIComponent(value);
-      } catch {
-        return value;
-      }
-    }
+const HTML_HEADERS = {
+  'content-type': 'text/html; charset=utf-8',
+  'cache-control': 'no-store',
+  'x-frame-options': 'DENY',
+  'referrer-policy': 'no-referrer',
+  'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'",
+};
+
+/**
+ * 设置页鉴权（两种凭据，任一即可）：
+ *   1. ADMIN_TOKEN —— Bearer，用于自动化 / 忘记密码时的兜底；不设则关闭
+ *   2. 登录会话 —— 首次访问创建的管理员账号，HttpOnly Cookie
+ */
+function adminAuth(req, { config, auth, sessions }) {
+  const bearer = String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, '').trim();
+  if (config.adminToken && bearer && bearer === config.adminToken) {
+    return { ok: true, via: 'token', username: auth.summary().username || 'admin' };
   }
-  return '';
+  const token = readCookie(req.headers.cookie, SESSION_COOKIE);
+  const sess = sessions.verify(token);
+  if (sess) return { ok: true, via: 'session', username: sess.username, token };
+  return { ok: false, via: '', username: '', token: '' };
 }
 
-/** 设置页鉴权：ADMIN_TOKEN（Bearer 或登录 Cookie）> 本机回环。 */
-function adminAuthorized(req, config) {
-  if (config.adminToken) {
-    const bearer = String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, '').trim();
-    if (bearer && bearer === config.adminToken) return true;
-    return readCookie(req, 'tcg_admin') === config.adminToken;
-  }
-  const ip = req.socket.remoteAddress ?? '';
-  return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+function rejectAdmin(req, res, ctx) {
+  const state = adminAuth(req, ctx);
+  if (state.ok) return state;
+  sendError(res, 401, 'admin_unauthorized', '请先登录管理设置（打开 /admin）');
+  return null;
 }
 
-async function handleAdminLogin(req, res, config) {
+/** 首次运行：还没创建管理员账号 */
+function setupRequired(ctx) {
+  return !ctx.auth.configured();
+}
+
+function clientIp(req) {
+  const fwd = String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim();
+  return fwd || req.socket.remoteAddress || '';
+}
+
+async function handleAdminSetup(req, res, ctx) {
+  const { auth, settings, sessions, limiter, logger, config } = ctx;
+  if (auth.configured()) {
+    return sendError(res, 409, 'auth_already_setup', '管理员账号已创建，请直接登录 /admin');
+  }
+  const parsed = await readJsonBody(req, 16 * 1024);
+  if (parsed.error) return sendError(res, parsed.error.status, parsed.error.type, parsed.error.message);
+  const body = parsed.json ?? {};
+
+  const ip = clientIp(req);
+  const gate = limiter.check(`setup:${ip}`);
+  if (gate.blocked) {
+    res.setHeader('retry-after', String(Math.ceil(gate.retryAfterMs / 1000)));
+    return sendError(res, 429, 'too_many_attempts', '尝试过于频繁，请稍后再试');
+  }
+
+  let patch;
+  try {
+    patch = normalizePatch({
+      upstreamBaseUrl: body.upstreamBaseUrl,
+      upstreamApiKey: body.upstreamApiKey ?? '',
+      defaultModel: body.defaultModel ?? '',
+    });
+  } catch (err) {
+    return sendSettingsError(res, err);
+  }
+  if (!patch.upstreamBaseUrl) {
+    return sendError(res, 400, 'settings_invalid', '请填写上游 Base URL', {
+      errors: [{ field: 'upstreamBaseUrl', message: '必填，例如 https://api.deepseek.com' }],
+    });
+  }
+
+  try {
+    auth.create({ username: body.username, password: body.password });
+  } catch (err) {
+    limiter.fail(`setup:${ip}`);
+    if (err instanceof AuthError) return sendError(res, err.status, err.type, err.message, { field: err.field });
+    throw err;
+  }
+
+  try {
+    settings.update(patch);
+  } catch (err) {
+    return sendSettingsError(res, err);
+  }
+
+  const token = sessions.issue(auth.summary().username, { ip });
+  res.setHeader('set-cookie', sessionCookie(token, { ttlMs: sessions.ttlMs, secure: isSecureRequest(req) }));
+  logger.info('admin setup completed', { username: auth.summary().username, upstream: patch.upstreamBaseUrl });
+  return sendJson(res, 201, { ok: true, ...adminView(settings, ctx) });
+}
+
+async function handleAdminLogin(req, res, ctx) {
+  const { auth, sessions, limiter, settings, logger } = ctx;
+  if (setupRequired(ctx)) {
+    return sendError(res, 409, 'auth_not_setup', '尚未初始化，请打开 /admin 完成首次配置');
+  }
   const parsed = await readJsonBody(req, 8 * 1024);
   if (parsed.error) return sendError(res, parsed.error.status, parsed.error.type, parsed.error.message);
-  if (!config.adminToken) return sendJson(res, 200, { ok: true, mode: 'loopback' });
-  const token = String(parsed.json?.token ?? '').trim();
-  if (!token || token !== config.adminToken) {
-    return sendError(res, 401, 'admin_unauthorized', '令牌不正确');
+  const ip = clientIp(req);
+  const key = `login:${ip}`;
+  const gate = limiter.check(key);
+  if (gate.blocked) {
+    res.setHeader('retry-after', String(Math.ceil(gate.retryAfterMs / 1000)));
+    return sendError(res, 429, 'too_many_attempts', `尝试过于频繁，请 ${Math.ceil(gate.retryAfterMs / 60000)} 分钟后再试`);
   }
-  res.setHeader('set-cookie', `tcg_admin=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400`);
-  return sendJson(res, 200, { ok: true, mode: 'token' });
-}
 
-function rejectAdmin(req, res, config) {
-  if (adminAuthorized(req, config)) return false;
-  sendError(
-    res,
-    401,
-    'admin_unauthorized',
-    config.adminToken
-      ? '设置页需要 Authorization: Bearer <ADMIN_TOKEN>'
-      : '设置页默认只允许本机访问；远程访问请设置 ADMIN_TOKEN 并携带 Bearer 令牌',
-  );
-  return true;
+  const body = parsed.json ?? {};
+  // 兼容旧行为：ADMIN_TOKEN 直接贴进密码框也能进（方便自动化）
+  const adminToken = auth.summary().username;
+  const tokenInput = String(body.token ?? '').trim();
+  if (ctx.config.adminToken && tokenInput && tokenInput === ctx.config.adminToken) {
+    limiter.reset(key);
+    const token = sessions.issue(adminToken, { ip });
+    res.setHeader('set-cookie', sessionCookie(token, { ttlMs: sessions.ttlMs, secure: isSecureRequest(req) }));
+    return sendJson(res, 200, { ok: true, via: 'token', ...adminView(settings, ctx) });
+  }
+
+  const ok = auth.verify({ username: body.username, password: body.password });
+  if (!ok) {
+    const st = limiter.fail(key);
+    return sendError(res, 401, 'auth_bad_credentials', '用户名或密码不正确', {
+      remainingAttempts: Math.max(0, 5 - st.count),
+    });
+  }
+  limiter.reset(key);
+  const token = sessions.issue(auth.summary().username, { ip });
+  res.setHeader('set-cookie', sessionCookie(token, { ttlMs: sessions.ttlMs, secure: isSecureRequest(req) }));
+  logger.info('admin login', { username: auth.summary().username, ip });
+  return sendJson(res, 200, { ok: true, via: 'session', ...adminView(settings, ctx) });
 }
 
 async function handleRequest(req, res, ctx) {
   const { getConfig, settings, logger } = ctx;
   const config = getConfig();
+  const rctx = { ...ctx, config }; // 每请求带上最新配置（UI 热更新后立即生效）
   const url = new URL(req.url ?? '/', 'http://127.0.0.1');
   logger.debug('request', { method: req.method, path: url.pathname });
 
   if (req.method === 'GET' && url.pathname === '/healthz') {
-    return sendJson(res, 200, { status: 'ok' });
+    return sendJson(res, 200, {
+      status: 'ok',
+      setupRequired: setupRequired(rctx),
+      upstreamConfigured: Boolean(String(config.upstreamBaseUrl ?? '').trim()),
+    });
   }
 
+  // ---- 首次初始化（账号不存在时开放；创建后永久 409）----
+  if (req.method === 'POST' && url.pathname === '/admin/api/setup') {
+    return handleAdminSetup(req, res, rctx);
+  }
+  if (req.method === 'POST' && url.pathname === '/admin/api/setup/test' && setupRequired(rctx)) {
+    return handleAdminTest(req, res, rctx);
+  }
   if (req.method === 'POST' && url.pathname === '/admin/api/login') {
-    return handleAdminLogin(req, res, config);
+    return handleAdminLogin(req, res, rctx);
+  }
+  if (req.method === 'GET' && url.pathname === '/admin/api/session') {
+    const state = adminAuth(req, rctx);
+    return sendJson(res, 200, {
+      setupRequired: setupRequired(rctx),
+      authenticated: state.ok,
+      via: state.via,
+      username: state.username,
+      adminMode: config.adminToken ? 'token-or-account' : 'account',
+      upstreamConfigured: Boolean(String(config.upstreamBaseUrl ?? '').trim()),
+    });
   }
 
   if (req.method === 'GET' && (url.pathname === '/admin' || url.pathname === '/admin/')) {
-    const headers = {
-      'content-type': 'text/html; charset=utf-8',
-      'cache-control': 'no-store',
-      'x-frame-options': 'DENY',
-      'referrer-policy': 'no-referrer',
-      'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'",
-    };
-    if (!adminAuthorized(req, config)) {
-      res.writeHead(401, headers);
-      res.end(renderLoginHtml({ version: packageVersion() }));
+    if (setupRequired(rctx)) {
+      res.writeHead(200, HTML_HEADERS);
+      res.end(renderSetupHtml({ version: packageVersion() }));
       return;
     }
-    res.writeHead(200, headers);
-    res.end(renderAdminHtml({ version: packageVersion() }));
+    const state = adminAuth(req, rctx);
+    if (!state.ok) {
+      res.writeHead(200, HTML_HEADERS);
+      res.end(renderLoginHtml({ version: packageVersion(), username: ctx.auth.summary().username }));
+      return;
+    }
+    res.writeHead(200, HTML_HEADERS);
+    res.end(renderAdminHtml({ version: packageVersion(), username: state.username }));
     return;
   }
 
   if (url.pathname.startsWith('/admin/api/')) {
-    if (rejectAdmin(req, res, config)) return;
-    return handleAdminApi(req, res, url, { config, settings, logger });
+    if (!rejectAdmin(req, res, rctx)) return;
+    return handleAdminApi(req, res, url, rctx);
   }
 
   if (req.method === 'GET' && url.pathname === '/v1/models') {
     if (rejectUnauthorized(req, res, config)) return;
+    if (rejectUnconfigured(res, config)) return;
     return handleModels(res, config, logger);
   }
 
   if (req.method === 'POST' && url.pathname === '/v1/chat/completions') {
     if (rejectUnauthorized(req, res, config)) return;
+    if (rejectUnconfigured(res, config)) return;
     return handleChatCompletions(req, res, config, logger);
   }
 
   return sendError(res, 404, 'not_found', `未知路由: ${req.method} ${url.pathname}`);
+}
+
+/** 没配上游时给出可操作的 503，而不是打到一个猜的默认地址 */
+function rejectUnconfigured(res, config) {
+  if (String(config.upstreamBaseUrl ?? '').trim()) return false;
+  sendError(
+    res,
+    503,
+    'upstream_not_configured',
+    '网关尚未配置上游。打开 /admin 首次配置（网页里创建管理员并填写上游地址与模型），保存后立即生效。',
+  );
+  return true;
 }
 
 // ---------------------------------------------------------------- 设置页 API
@@ -276,23 +415,108 @@ function withCandidate(config, patch) {
   return next;
 }
 
-/** 设置页视图：附带"当前鉴权模式"，让页面能显示 令牌保护 / 本机访问 */
-function adminView(settings, config) {
+/** 设置页视图：附带账号/鉴权模式，让页面能显示"账号登录 + 令牌可用" */
+function adminView(settings, ctx) {
   const view = settings.publicView();
-  return { ...view, meta: { ...view.meta, adminMode: config.adminToken ? 'token' : 'loopback' } };
+  const summary = ctx?.auth?.summary?.() ?? { configured: false, username: '' };
+  return {
+    ...view,
+    account: {
+      username: summary.username,
+      createdAt: summary.createdAt ?? null,
+      updatedAt: summary.updatedAt ?? null,
+    },
+    meta: {
+      ...view.meta,
+      adminMode: ctx?.config?.adminToken ? 'token-or-account' : 'account',
+      tokenEnabled: Boolean(ctx?.config?.adminToken),
+      sessions: ctx?.sessions?.size?.() ?? 0,
+    },
+  };
 }
 
-async function handleAdminApi(req, res, url, { config, settings, logger }) {
+/** 用候选配置探一次 GET /v1/models（保存前先验证，避免存了打不通的地址） */
+async function handleAdminTest(req, res, ctx) {
+  const { config, logger } = ctx;
+  const parsed = await readJsonBody(req, 64 * 1024);
+  if (parsed.error) return sendError(res, parsed.error.status, parsed.error.type, parsed.error.message);
+  const body = parsed.json ?? {};
+  const patch = body.settings ?? body;
+  let candidate;
+  try {
+    candidate = withCandidate(config, patch);
+  } catch (err) {
+    return sendSettingsError(res, err);
+  }
+  if (!String(candidate.upstreamBaseUrl ?? '').trim()) {
+    return sendError(res, 400, 'settings_invalid', '请先填写上游 Base URL', {
+      errors: [{ field: 'upstreamBaseUrl', message: '必填' }],
+    });
+  }
+  const started = Date.now();
+  try {
+    const result = await callUpstreamGet({
+      url: upstreamUrl(candidate.upstreamBaseUrl, '/v1/models'),
+      apiKey: candidate.upstreamApiKey,
+      timeoutMs: Math.min(candidate.requestTimeoutMs || 15000, 15000),
+    });
+    const latencyMs = Date.now() - started;
+    if (result.status >= 400) {
+      return sendError(res, 502, 'upstream_error', `上游返回 HTTP ${result.status}`, {
+        upstream: String(result.text ?? '').slice(0, 300),
+      });
+    }
+    const models = (Array.isArray(result.json?.data) ? result.json.data : []).map((m) => ({
+      id: m?.id ?? '',
+      supports_tool_call: m?.supports_tool_call,
+    }));
+    logger.debug?.('admin test ok', { baseUrl: candidate.upstreamBaseUrl, models: models.length, latencyMs });
+    return sendJson(res, 200, {
+      ok: true,
+      status: result.status,
+      latencyMs,
+      baseUrl: candidate.upstreamBaseUrl,
+      models,
+    });
+  } catch (err) {
+    return sendSettingsError(res, err);
+  }
+}
+
+async function handleAdminApi(req, res, url, ctx) {
+  const { config, settings, logger, auth, sessions } = ctx;
   if (!settings) return sendError(res, 503, 'settings_unavailable', '本实例没有启用设置存储');
   const pathname = url.pathname.replace(/\/+$/, '');
 
   if (pathname === '/admin/api/logout' && req.method === 'POST') {
-    res.setHeader('set-cookie', 'tcg_admin=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0');
+    const token = readCookie(req.headers.cookie, SESSION_COOKIE);
+    if (token) sessions?.revoke(token);
+    res.setHeader('set-cookie', clearCookie());
     return sendJson(res, 200, { ok: true });
   }
 
+  if (pathname === '/admin/api/password' && req.method === 'POST') {
+    const parsed = await readJsonBody(req, 8 * 1024);
+    if (parsed.error) return sendError(res, parsed.error.status, parsed.error.type, parsed.error.message);
+    try {
+      auth.changePassword({
+        currentPassword: parsed.json?.currentPassword,
+        newPassword: parsed.json?.newPassword,
+      });
+    } catch (err) {
+      if (err instanceof AuthError) return sendError(res, err.status, err.type, err.message, { field: err.field });
+      throw err;
+    }
+    // 改完密码让所有旧会话失效，再给当前浏览器发一个新会话
+    sessions?.revokeAll();
+    const token = sessions.issue(auth.summary().username, { ip: clientIp(req) });
+    res.setHeader('set-cookie', sessionCookie(token, { ttlMs: sessions.ttlMs, secure: isSecureRequest(req) }));
+    logger.info('admin password rotated', { username: auth.summary().username });
+    return sendJson(res, 200, { ok: true, ...adminView(settings, ctx) });
+  }
+
   if (pathname === '/admin/api/settings' && req.method === 'GET') {
-    return sendJson(res, 200, adminView(settings, config));
+    return sendJson(res, 200, adminView(settings, ctx));
   }
 
   if (pathname === '/admin/api/settings' && (req.method === 'PUT' || req.method === 'POST')) {
@@ -301,7 +525,7 @@ async function handleAdminApi(req, res, url, { config, settings, logger }) {
     const patch = parsed.json?.settings ?? parsed.json ?? {};
     try {
       settings.update(patch);
-      const view = adminView(settings, config);
+      const view = adminView(settings, ctx);
       logger.info('settings applied', { overrides: view.meta.activeOverrides });
       return sendJson(res, 200, view);
     } catch (err) {
@@ -311,45 +535,11 @@ async function handleAdminApi(req, res, url, { config, settings, logger }) {
 
   if (pathname === '/admin/api/settings/reset' && req.method === 'POST') {
     settings.reset();
-    return sendJson(res, 200, adminView(settings, config));
+    return sendJson(res, 200, adminView(settings, ctx));
   }
 
   if (pathname === '/admin/api/test' && req.method === 'POST') {
-    const parsed = await readJsonBody(req, 64 * 1024);
-    if (parsed.error) return sendError(res, parsed.error.status, parsed.error.type, parsed.error.message);
-    let candidate;
-    try {
-      candidate = withCandidate(config, parsed.json?.settings ?? {});
-    } catch (err) {
-      return sendSettingsError(res, err);
-    }
-    const started = Date.now();
-    try {
-      const result = await callUpstreamGet({
-        url: upstreamUrl(candidate.upstreamBaseUrl, '/v1/models'),
-        apiKey: candidate.upstreamApiKey,
-        timeoutMs: Math.min(candidate.requestTimeoutMs || 15000, 15000),
-      });
-      const latencyMs = Date.now() - started;
-      if (result.status >= 400) {
-        return sendError(res, 502, 'upstream_error', `上游返回 HTTP ${result.status}`, {
-          upstream: String(result.text ?? '').slice(0, 300),
-        });
-      }
-      const models = (Array.isArray(result.json?.data) ? result.json.data : []).map((m) => ({
-        id: m?.id ?? '',
-        supports_tool_call: m?.supports_tool_call,
-      }));
-      return sendJson(res, 200, {
-        ok: true,
-        status: result.status,
-        latencyMs,
-        baseUrl: candidate.upstreamBaseUrl,
-        models,
-      });
-    } catch (err) {
-      return sendSettingsError(res, err);
-    }
+    return handleAdminTest(req, res, ctx);
   }
 
   if (pathname === '/admin/api/test-tool' && req.method === 'POST') {
@@ -767,13 +957,23 @@ export function startServer({ config = defaultConfig, logger = defaultLogger, se
   server.listen(config.port, () => {
     const addr = server.address();
     const port = typeof addr === 'object' && addr ? addr.port : config.port;
+    const cfg = store.get();
+    const admin = server.adminState();
     logger.info('toolcall-gateway listening', {
       port,
-      toolMode: config.toolMode,
-      upstream: config.upstreamBaseUrl,
+      toolMode: cfg.toolMode,
+      upstream: cfg.upstreamBaseUrl || '(未配置)',
       settingsFile: store.filePath,
-      admin: config.adminToken ? 'token-required' : 'loopback-only',
+      adminAccount: admin.configured ? admin.username : '未初始化',
     });
+    const hints = [];
+    if (!admin.configured) {
+      hints.push(`首次初始化：浏览器打开 http://localhost:${port}/admin 创建管理员并填写上游（在此之前，任何能访问该端口的客户端都可以完成初始化）`);
+    }
+    if (!String(cfg.upstreamBaseUrl ?? '').trim()) {
+      hints.push(`上游未配置：/v1 请求会返回 503 upstream_not_configured，配置保存后立即生效`);
+    }
+    if (hints.length) logger.warn('需要完成初始化', { hints });
   });
   return server;
 }

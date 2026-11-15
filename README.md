@@ -1,22 +1,30 @@
 # toolcall-gateway
 
 [![ci-and-publish](https://github.com/kaoqy/tool-calls-gateway/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/kaoqy/tool-calls-gateway/actions/workflows/docker-publish.yml)
-[![ghcr](https://img.shields.io/badge/ghcr.io-toolcall--gateway%3Av1.2.0-blue)](https://github.com/kaoqy/tool-calls-gateway/pkgs/container/toolcall-gateway)
+[![ghcr](https://img.shields.io/badge/ghcr.io-toolcall--gateway%3Av1.3.0-blue)](https://github.com/kaoqy/tool-calls-gateway/pkgs/container/toolcall-gateway)
 
 > **OpenAI 兼容 · 工具调用模拟** 轻量中转网关。
 > 让「只支持纯聊天」的上游模型（如 DeepSeek 纯聊天接口）在不改造下游 Agent / SDK / 客户端的前提下，**变相支持 tool_calls**。
 
 - 运行时：Node.js 20+（ESM，`.mjs`），**零运行时依赖**（只用 `node:` 内置模块 + 全局 `fetch`），无构建步骤。
-- 部署：单镜像 `node:20-alpine`，非 root（`USER node`），带 `HEALTHCHECK`，支持 `docker compose up`。
+- 部署：单镜像 `node:20-alpine`，非 root（`USER node`），带 `HEALTHCHECK`；**零配置**——不填任何环境变量，起容器后在 `/admin` 网页里完成初始化。
 - 无状态：网关不保存任何会话，见 [协议假设](#协议的硬性假设)。
 
-## 🚀 部署
+## 🚀 部署（零配置）
 
-> 已发布镜像：**`ghcr.io/kaoqy/tool-calls-gateway:v1.2.0`**（`linux/amd64` + `linux/arm64`，由 GitHub Actions 在打 tag 时自动构建并推送）
+> 已发布镜像：**`ghcr.io/kaoqy/tool-calls-gateway:v1.3.0`**（`linux/amd64` + `linux/arm64`，push tag 时由 GitHub Actions 自动构建推送）
 
-**前置条件**：Docker 20.10+（compose v2）；一个 OpenAI 兼容、只支持纯聊天的上游（Base URL + API Key）。
+**不需要任何环境变量**：不填上游、不填密钥、不用准备 `.env`。把容器起来，打开网页，第一次访问时创建管理员账号 + 填上游，保存即生效。
 
-三种方式任选其一，部署完都能在 `/admin` 里改上游，不用再动 env。
+```bash
+docker run -d --name toolcall-gateway -p 8787:8787 \
+  -v tcg-data:/app/data --restart unless-stopped \
+  ghcr.io/kaoqy/tool-calls-gateway:v1.3.0
+```
+
+然后浏览器打开 **`http://<host>:8787/admin`** —— 这就是全部初始化。
+
+**唯一需要记住的事**：`/app/data` 必须挂在卷上（上面的 `-v tcg-data:/app/data` 已经做了），否则容器重建会丢账号和上游配置。
 
 ### 方式 A · 一键脚本（推荐）
 
@@ -24,71 +32,51 @@
 curl -fsSL https://raw.githubusercontent.com/kaoqy/tool-calls-gateway/main/deploy.sh | sh
 ```
 
-脚本会：生成 `./toolcall-gateway/.env` → 校验必填项 → 自动生成设置页令牌 → 拉镜像 → `docker compose up -d` → 轮询 `/healthz` 就绪。
+脚本一次跑完：拉镜像 → 起容器（带数据卷与 healthcheck）→ 轮询 `/healthz` → 打印设置页地址。中途不要你填任何东西。
 
-**第一次执行只会生成 `.env` 并退出**，填两个必填项后再跑一次：
-
-```bash
-cd toolcall-gateway
-vi .env          # UPSTREAM_BASE_URL / UPSTREAM_API_KEY
-sh deploy.sh     # 或在原目录重新执行上面的 curl
-```
-
-第二次输出会给出：
-
-```
-==> 已生成设置页令牌：ADMIN_TOKEN=<随机 32 位>
-==> 就绪：{"status":"ok"}
-OpenAI 兼容端点： http://127.0.0.1:8787/v1
-设置页：         http://127.0.0.1:8787/admin
-```
-
-### 方式 B · docker compose（要改配置 / 长期运行）
+### 方式 B · docker compose
 
 ```bash
 git clone https://github.com/kaoqy/tool-calls-gateway.git && cd tool-calls-gateway
-cp .env.example .env
-vi .env                                   # 至少填 UPSTREAM_BASE_URL / UPSTREAM_API_KEY / ADMIN_TOKEN
-docker compose -f docker-compose.prod.yml up -d
-curl -s localhost:8787/healthz            # {"status":"ok"}
+docker compose -f docker-compose.prod.yml up -d      # 用预构建镜像
+# 想自己构建：docker compose up -d --build
 ```
 
-> `docker-compose.prod.yml` 用预构建镜像（不 build），带 `read_only` + `no-new-privileges`，配置持久化在 named volume `tcg-data:/app/data`。
-> 想自己构建：`docker compose up -d --build`（读 `docker-compose.yml`）。
+`docker-compose.prod.yml` 带 `read_only` + `no-new-privileges` + `tmpfs /tmp`，配置持久化在 named volume `tcg-data:/app/data`。两个 compose 文件都**不引用 `.env`**，所以不需要先 `cp .env.example .env`。
 
-### 方式 C · docker run（临时验证 / 已有编排）
+### 方式 C · docker run（已有编排 / 临时验证）
 
 ```bash
 docker run -d --name toolcall-gateway \
   -p 8787:8787 \
-  -e UPSTREAM_BASE_URL=https://api.deepseek.com \
-  -e UPSTREAM_API_KEY=sk-你的密钥 \
-  -e DEFAULT_MODEL=deepseek-chat \
-  -e ADMIN_TOKEN=$(openssl rand -hex 16) \
   -v tcg-data:/app/data \
   --restart unless-stopped \
-  ghcr.io/kaoqy/tool-calls-gateway:v1.2.0
+  ghcr.io/kaoqy/tool-calls-gateway:v1.3.0
 
-docker logs toolcall-gateway | tail -5       # 确认 listening
-curl -s localhost:8787/healthz
+docker logs toolcall-gateway | tail -5     # 未初始化时日志会提示去 /admin
+curl -s localhost:8787/healthz             # {"status":"ok","setupRequired":true,...}
 ```
 
-### 首次配置（3 步）
+### 首次访问（三步，全在网页里）
 
-1. 打开 `http://<host>:8787/admin`，输入 `ADMIN_TOKEN`（方式 B/C 里自己填的那个）。
-2. 填上游 Base URL 与 API Key → 点 **测试连接** 确认能列出模型（顺便看 `supports_tool_call`：`false` 说明必须走提示词模拟）。
-3. 点 **保存并应用** —— 立即热生效，不用重启；配置写到 `/app/data/settings.json`。
+1. **创建管理员**：用户名 + 密码（≥8 位）。这是 `/admin` 的登录凭据，只存在 `data/auth.json`（scrypt 哈希，不存明文）。
+2. **填上游**：Base URL、API Key、默认模型 → 点 **测试连接**，会真的探一次 `/v1/models` 并标注每个模型的 `supports_tool_call`（`false` 说明必须走提示词模拟，正是本网关的场景）。
+3. **完成初始化** → 自动登录进控制台，配置已落盘且**立即生效**，不用重启。
+
+![首次初始化](docs/setup.png)
+
+<sub>填完点「测试连接」会列出上游模型并标注 `supports_tool_call`，再点「完成初始化」。</sub>
+
+> 初始化完成前，任何能访问该端口的人都可以创建这个账号（与 Jellyfin / Grafana 首次安装一致）。要避免这个窗口：先设 `ADMIN_TOKEN`，或只在信任的网络里暴露端口。
 
 ### 部署后自检
 
 ```bash
-# 1) 健康
 curl -s localhost:8787/healthz
+# {"status":"ok","setupRequired":false,"upstreamConfigured":true}
 
-# 2) 上游连通（经网关）
-curl -s localhost:8787/v1/models -H "authorization: Bearer $GATEWAY_API_KEY"
+curl -s localhost:8787/v1/models | head -c 300        # 有没有真打到上游
 
-# 3) 带 tools 的请求能否拿到 tool_calls
 curl -s localhost:8787/v1/chat/completions \
   -H 'content-type: application/json' \
   -d '{"model":"deepseek-chat","messages":[{"role":"user","content":"北京天气？"}],
@@ -97,21 +85,38 @@ curl -s localhost:8787/v1/chat/completions \
   | head -c 400
 ```
 
-预期第 3 步返回 `finish_reason: "tool_calls"` 与 `tool_calls[0].function.arguments`。
+预期：`healthz` 两项都是 `true`；第三个请求返回 `finish_reason: "tool_calls"` 与 `tool_calls[0].function.arguments`。
+也可以直接在 `/admin` 的「自检」里点两个按钮（**测试连接** / **工具模拟自检**），不用敲命令。
+
+### 数据与备份
+
+| 文件（容器内） | 内容 | 备份 / 迁移 |
+| --- | --- | --- |
+| `/app/data/auth.json` | 管理员账号（scrypt 哈希） | 复制走即可；删掉后重启 = 重新初始化 |
+| `/app/data/settings.json` | UI 保存的配置（含上游密钥，0600） | 同上；删掉 = 回落 env / 默认值 |
+
+```bash
+# 导出配置（含密钥，注意保管）
+docker run --rm -v tcg-data:/data -v "$PWD":/out alpine tar czf /out/tcg-backup.tgz -C /data .
+```
+
+**忘了密码**：删 `auth.json` 后重启容器，`/admin` 会重新回到初始化向导（上游配置不受影响）。
 
 ### 部署常见问题
 
 | 现象 | 原因 / 处理 |
 | --- | --- |
-| 打开 `/admin` 返回 401 | 容器里没设 `ADMIN_TOKEN`（端口映射下来源不是回环，无法免登录）；`deploy.sh` 会自动生成，手动部署请自行设置 |
-| `docker compose` 报 `env file .env not found` | 先 `cp .env.example .env` |
-| 拉取镜像 `denied` | 仓库/镜像是私有的：`echo $GITHUB_TOKEN \| docker login ghcr.io -u <用户名> --password-stdin` |
+| `/v1` 返回 `503 upstream_not_configured` | 还没配上游：打开 `/admin` 填好并保存 |
+| 打开 `/admin` 是"初始化"页而不是登录页 | 正常：本实例还没创建管理员账号，按提示填完即可 |
+| 打开 `/admin` 是登录页，忘了账号 | 用户名在 `/healthz` 看不到，看 `docker logs` 里的 `adminAccount` 一行；或删 `auth.json` 重置 |
+| 登录报"尝试过于频繁" | 同来源 5 次失败会锁 5 分钟；确实忘了密码就删 `auth.json` |
+| 拉取镜像 `denied` | 镜像/仓库是私有的：`echo $GITHUB_TOKEN \| docker login ghcr.io -u <用户名> --password-stdin` |
 | 上游返回 `403 需要重新登录或人机验证` | 上游是 web 类模型通道，触发了反爬；网关原样透传，换 API 计费通道或降低调用频率 |
-| 容器重建后设置丢了 | 没挂 `/app/data` 卷；用 compose（已内置 `tcg-data`）或加 `-v tcg-data:/app/data` |
-| 想回到 env 配置 | 设置页「恢复环境变量默认值」，或删掉容器内 `/app/data/settings.json` |
+| 容器重建后账号/配置没了 | 没挂 `/app/data` 卷；用上面的 `-v tcg-data:/app/data` |
+| 想改端口 | `-p 9000:8787`；容器内始终监听 8787 |
 
-> 部署完成后，把下游 SDK 的 `base_url` 指向 `http://<host>:8787/v1`（见 [4. 客户端接入示例](#4-客户端接入示例)）。
-> 若设置了 `GATEWAY_API_KEY`，下游需带 `Authorization: Bearer <GATEWAY_API_KEY>`；网关发往上游时始终改用 `UPSTREAM_API_KEY`。
+> 下游 SDK 的 `base_url` 指向 `http://<host>:8787/v1`（见 [4. 客户端接入示例](#4-客户端接入示例)）。
+> 若在 `/admin` 里设了「下游网关 Key」，客户端需带 `Authorization: Bearer <该 Key>`；不设则任意 key 放行。发往上游时始终改用你配的上游 Key。
 
 ---
 
@@ -136,12 +141,19 @@ curl -s localhost:8787/v1/chat/completions \
 - **工具模拟自检**：用保存的配置真发一次带 `tools` 的请求（**消耗 1 次上游调用**），直接显示 `finish_reason`、`tool_calls` 数量与参数样例。
 - **接入信息**：页面底部给出本实例的 Base URL / Chat Completions / 健康检查地址与一段可复制的 `curl`（自动带上当前默认模型与网关 Key 状态）。
 - **恢复环境变量默认值**：一键清空所有 UI 覆盖项（删除设置文件）。
-- **访问控制**：分两种模式——
-  - 本机裸跑（来源是 `127.0.0.1` / `::1`）：**免登录**，直接打开 `/admin`。
-  - Docker / 端口映射 / 反向代理（来源是网桥网关或代理 IP）：**必须设置 `ADMIN_TOKEN`**。`deploy.sh` 会自动生成并打印；浏览器打开 `/admin` 输入令牌，服务端下发 `HttpOnly` Cookie（24h），也可直接用 `Authorization: Bearer <ADMIN_TOKEN>` 调 API。
-- **持久化**：设置写到 `DATA_DIR/settings.json`（默认 `data/`，权限 0600）。容器部署务必挂 volume（compose 已内置 `tcg-data:/app/data`），否则重建会丢。
+- **账号**：独立的「账号」分区可以改密码（改完其它浏览器的会话立刻失效）与退出登录。
+- **鉴权**：只有一个模型——**首次访问创建的管理员账号**。
+  - 账号不存在时：`/admin` 是**初始化向导**（创建账号 + 填上游），任何能访问该端口的人都可以完成这一次（同 Jellyfin / Grafana）。
+  - 账号存在后：`/admin` 一律要登录（用户名 + 密码 → `HttpOnly` + `SameSite=Lax` 的会话 Cookie，7 天）；密码用 `scrypt` 加盐哈希，只存 `data/auth.json`。
+  - 登录页长这样（用户名会回填）：
 
-> 安全提示：设置页能改上游地址，等价于一个"代理配置"入口，请只在内网暴露或放在带鉴权的反代之后。
+  ![登录页](docs/login.png)
+
+  - 同来源连续 5 次登录失败会锁 5 分钟（`429` + `Retry-After`）。
+  - 可选 `ADMIN_TOKEN`：给自动化或"忘记密码"留一把 `Authorization: Bearer` 的后门（也可在登录页折叠区里贴令牌）。
+- **持久化**：`DATA_DIR`（默认 `data/`）下两个 0600 文件——`auth.json`（账号）、`settings.json`（配置）。容器部署务必挂 volume（compose 已内置 `tcg-data:/app/data`），否则重建会丢。
+
+> 安全提示：设置页能改上游地址，等价于一个"代理配置"入口。初始化完成后它就受账号保护；要在公网暴露时，优先放在带鉴权的反代之后，或先设 `ADMIN_TOKEN` 再开放端口。
 
 ## 1. 它解决什么问题
 
@@ -169,46 +181,43 @@ curl -s localhost:8787/v1/chat/completions \
 ### 2.1 本机裸跑（Node 20+）
 
 ```bash
-cp .env.example .env          # 填 UPSTREAM_BASE_URL / UPSTREAM_API_KEY
+node src/server.mjs          # 零配置：起来后打开 http://127.0.0.1:8787/admin 初始化
+# 或 npm start
+```
+
+想用 env 预置（CI / 不想动网页）时再加载文件：
+
+```bash
 node --env-file=.env src/server.mjs
-# 或：npm start（配合 shell 里已导出的环境变量）
 ```
 
 ### 2.2 Docker
 
 ```bash
 docker build -t toolcall-gateway:dev .
-docker run --rm -p 8787:8787 --env-file .env toolcall-gateway:dev
-curl -s localhost:8787/healthz      # {"status":"ok"}
+docker run --rm -p 8787:8787 -v tcg-data:/app/data toolcall-gateway:dev
+curl -s localhost:8787/healthz      # {"status":"ok","setupRequired":true,"upstreamConfigured":false}
 ```
 
 ### 2.3 docker compose
 
-```yaml
-# docker-compose.yml（已随仓库提供）
-services:
-  toolcall-gateway:
-    build: .
-    ports: ["${HOST_PORT:-8787}:8787"]
-    env_file: [.env]
-    restart: unless-stopped
-```
-
 ```bash
-cp .env.example .env && vi .env
-docker compose up -d
+docker compose up -d --build        # 读 docker-compose.yml，不需要 .env
 curl -s localhost:8787/healthz
 docker compose logs -f
 docker compose down
 ```
 
-### 2.4 环境变量
+### 2.4 环境变量（**全部可选**）
+
+> 正常使用不需要任何环境变量：上游、密钥、管理员账号都在 `/admin` 里配。
+> 这里的变量只用于 CI 预置、自动化、或调整运行参数；**网页里保存的值优先级更高**。
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `PORT` | `8787` | 监听端口 |
-| `UPSTREAM_BASE_URL` | `https://api.deepseek.com` | 上游 base（可带 `/v1`，网关会避免拼成 `/v1/v1`） |
-| `UPSTREAM_API_KEY` | 空 | 上游密钥，**只从环境读，永不写日志** |
+| `UPSTREAM_BASE_URL` | 空 | 上游 base（可带 `/v1`，网关会避免拼成 `/v1/v1`）。留空时 `/v1` 返回 `503 upstream_not_configured` |
+| `UPSTREAM_API_KEY` | 空 | 上游密钥，**只从环境/设置文件读，永不写日志** |
 | `DEFAULT_MODEL` | 空 | 请求未带 `model` 时使用 |
 | `TOOL_MODE` | `auto` | `auto`=含 tools 时模拟；`off`=完全透传（不模拟，上游会因 tools 报错，仅用于排查） |
 | `REQUEST_TIMEOUT_MS` | `60000` | 单次上游请求总超时（含流式），超时返回 `504 upstream_timeout` |
@@ -218,28 +227,34 @@ docker compose down
 | `MODEL_OVERRIDE` | 空 | **硬覆盖**：任何请求都改写成这个上游模型（优先级最高） |
 | `GATEWAY_API_KEY` | 空 | 设置后校验下游 `Authorization: Bearer <key>`；发往上游时始终改用 `UPSTREAM_API_KEY`（客户端 key 不外泄） |
 | `REASONING_PASSTHROUGH` | `on` | `on` 时把上游 `reasoning_content`/`reasoning` 原样挂在响应 message（及流式 `delta.reasoning_content`）上，**不并入 content** |
+| `ADMIN_TOKEN` | 空 | 可选的管理令牌（自动化 / 忘记密码时兜底），用 `Authorization: Bearer <ADMIN_TOKEN>` 直接访问 `/admin` |
+| `DATA_DIR` | `data` | 数据目录：`auth.json`（管理员）+ `settings.json`（配置），均 0600。容器内务必挂 volume |
+| `SETTINGS_FILE` / `AUTH_FILE` | 空 | 直接指定文件完整路径，优先级高于 `DATA_DIR` |
 | `LIVE_MODEL` | `deepseek-web-flash` | live 脚本使用的真实模型 |
 | `MAX_LIVE_CALLS` | `40` | 每个 live 脚本进程最多打多少次真实上游（超出直接抛错并停止） |
 | `LIVE_DELAY_MS` | `1500`/`2000` | live 脚本的请求间隔（节流，避免触发 web 类上游的风控/人机验证） |
-| `ADMIN_TOKEN` | 空 | 设置页令牌。设置后 `/admin` 需 `Authorization: Bearer <ADMIN_TOKEN>`；不设则只允许本机回环访问 |
-| `DATA_DIR` | `data` | 设置文件目录（`settings.json`，权限 0600）。容器内务必挂 volume |
-| `SETTINGS_FILE` | 空 | 直接指定设置文件完整路径，优先级高于 `DATA_DIR` |
 
 ## 3. 端点
 
 | 方法 | 路径 | 行为 |
 | --- | --- | --- |
-| GET | `/healthz` | 返回 `{"status":"ok"}`（HEALTHCHECK 用） |
-| GET | `/v1/models` | 透传上游 |
-| POST | `/v1/chat/completions` | 含 `tools`/`functions` → 模拟；否则透传 |
-| GET | `/admin` | 设置页（HTML，无外部资源） |
+| GET | `/healthz` | `{"status":"ok","setupRequired":<bool>,"upstreamConfigured":<bool>}`（HEALTHCHECK 用） |
+| GET | `/v1/models` | 透传上游（未配上游时 503） |
+| POST | `/v1/chat/completions` | 含 `tools`/`functions` → 模拟；否则透传（未配上游时 503） |
+| GET | `/admin` | 初始化向导 / 登录页 / 控制台（HTML，单文件无外部资源） |
+| POST | `/admin/api/setup` | **首次初始化**：创建管理员 + 写入上游配置，返回会话 Cookie（账号已存在时 409） |
+| POST | `/admin/api/setup/test` | 初始化过程中的「测试连接」（用表单里的候选配置探 `/v1/models`，不保存） |
+| GET | `/admin/api/session` | 当前是否已初始化 / 是否已登录 |
+| POST | `/admin/api/login` | 用户名 + 密码换会话 Cookie（7 天）；也接受 `{token: ADMIN_TOKEN}` |
+| POST | `/admin/api/logout` | 撤销当前会话 Cookie |
+| POST | `/admin/api/password` | 改密码（校验当前密码，成功后其它会话全部失效） |
 | GET | `/admin/api/settings` | 当前生效配置（密钥掩码）+ 每个字段的来源 |
 | PUT | `/admin/api/settings` | 保存并热生效（只接受白名单字段，空值 = 取消覆盖） |
-| POST | `/admin/api/settings/reset` | 清除全部 UI 覆盖项，回落 env |
+| POST | `/admin/api/settings/reset` | 清除全部 UI 覆盖项，回落 env/默认值 |
 | POST | `/admin/api/test` | 用候选配置测试上游 `GET /models`（不保存） |
 | POST | `/admin/api/test-tool` | 用当前配置跑一次工具模拟自检（消耗 1 次上游调用） |
-| POST | `/admin/api/login` | 用 `ADMIN_TOKEN` 换登录 Cookie（24h） |
-| POST | `/admin/api/logout` | 清除登录 Cookie |
+
+`/admin*` 的鉴权：初始化窗口内（账号不存在）只有 `setup` / `setup/test` / `session` / `GET /admin` 可用；创建账号后除 `login` / `session` 外都需要登录会话（或 `ADMIN_TOKEN`）。
 
 错误统一为 OpenAI 风格：
 
@@ -247,7 +262,7 @@ docker compose down
 { "error": { "type": "upstream_timeout", "message": "上游响应超时" } }
 ```
 
-常见 `type`：`invalid_json` / `invalid_request_error` / `payload_too_large` / `upstream_timeout` / `upstream_error` / `not_found` / `internal_error`。
+常见 `type`：`invalid_json` / `invalid_request_error` / `payload_too_large` / `upstream_not_configured` / `upstream_timeout` / `upstream_error` / `admin_unauthorized` / `auth_bad_credentials` / `too_many_attempts` / `not_found` / `internal_error`。
 
 ## 4. 客户端接入示例
 
@@ -508,7 +523,7 @@ GATEWAY_API_KEY=local-dev-key
 
 ```bash
 npm test                  # 单元测试（node --test test/*.test.mjs）
-npm run gate              # 离线全量 gate（M0~M6 + M8 + M10-dry；会自起 mock + 网关，真打 HTTP）
+npm run gate              # 离线全量 gate（M0~M6 + M8 + M10~M12；会自起 mock + 网关，真打 HTTP）
 npm run gate:live         # 额外跑 M9（真实端点，会消耗额度）
 npm run conformance       # 工具调用全量矩阵（默认 dry-run / mock）
 npm run conformance:live  # 同上，打真实端点，产出 out/conformance-live.{json,md}
@@ -530,7 +545,8 @@ npm run e2e:live          # 真实双轮工具循环（--live）
 | G8 | 协议健壮性：reasoning 隔离 / 原生 tool_calls 兜底 / 参数特殊字符 / max_tokens 别名 / 异常 SSE / 模型映射 / 网关鉴权 + `conformance` dry 矩阵 35 项 |
 | G9 | 真实端点：`conformance --live` + `e2e_live --live` + `hitrate --live`（默认跳过，需 `--live`） |
 | G10 | Codex 形状（dry 恒跑；`--live` 时再加真实端点） |
-| G11 | 应用内设置（8 项存储单测 + 9 项 UI/热生效/鉴权 e2e） |
+| G11 | 应用内设置（8 项存储单测 + 7 项页面结构单测） |
+| G12 | 零配置部署：18 项鉴权单测 + 16 项 e2e（首次初始化 / 登录 / 节流 / 改密 / 重启持久化 / 未配上游 503） |
 
 `mock/upstream.mjs` 是可控的上游替身，通过 `X-Mock-Mode` 头、`?mode=` 或 model 名（`mock-<mode>[-<status>]`）选择模式：
 
@@ -569,37 +585,40 @@ toolcall-gateway/
 ├─ .dockerignore
 ├─ src/
 │  ├─ server.mjs           # http 服务 + 路由 + 鉴权 + 透传/模拟分支
+│  ├─ auth.mjs             # 管理员账号（scrypt）+ 内存会话 + 登录节流 + Cookie
 │  ├─ config.mjs           # 环境变量 + MODEL_MAP 解析/模型映射
 │  ├─ settings.mjs         # 应用内设置：校验/持久化/热生效/密钥脱敏
-│  ├─ admin-ui.mjs         # 设置页 HTML（单文件，零外部资源）
+│  ├─ admin-ui.mjs         # 初始化向导 / 登录页 / 控制台 HTML（单文件，零外部资源）
 │  ├─ upstream.mjs         # 调上游（超时/错误分类）
 │  ├─ prompt.mjs           # buildUpstreamRequest：注入 + 归一化 + 剥离
 │  ├─ protocol.mjs         # parseModelOutput / repairJson / 原生 tool_calls / 合成响应与 SSE
 │  ├─ sse.mjs              # SSE 读写（容忍异常框架、收集 reasoning/原生 tool_calls）
 │  └─ logger.mjs           # 级别过滤 + 密钥脱敏
-├─ test/                   # scaffold / prompt / protocol / streaming / robustness / robustness-protocol
+├─ test/                   # scaffold / prompt / protocol / streaming / robustness / settings / auth / admin / ui
 ├─ mock/upstream.mjs       # 可控上游替身（含 /__diag）
 ├─ scripts/
-│  ├─ gate.mjs             # 一键 gate（M0~M10，--live 才跑 M9）
+│  ├─ gate.mjs             # 一键 gate（M0~M12，--live 才跑 M9）
 │  ├─ conformance.mjs      # 工具调用全量矩阵（dry / --live）
 │  ├─ hitrate.mjs          # 命中率 + P50/P95（dry / --live）
 │  ├─ e2e_live.mjs         # 真实多轮工具循环
 │  ├─ e2e_codex.mjs        # Codex 形状（正向 + apply_patch 反向）
 │  ├─ e2e_passthrough.mjs / e2e_stream_tool.mjs / e2e_mock.mjs
 │  └─ lib/harness.mjs · lib/live.mjs   # 子进程/HTTP/额度/报告/脱敏
-├─ out/                    # live 报告的 JSON/Markdown（运行时生成）
-├─ data/                   # settings.json（设置页保存的覆盖项，0600；运行时生成）
+├─ out/                    # live 报告与截图（运行时生成）
+├─ data/                   # auth.json + settings.json（0600；运行时生成）
 └─ LEDGER.md               # 里程碑账本（含每轮 gate 的真实输出）
 ```
 
 ## 10. 安全
 
 - `UPSTREAM_API_KEY` 只在 `src/upstream.mjs` 里以 `Authorization` 头使用；日志经 `logger.redact()` 脱敏（`authorization`/`api_key`/`token`/`secret`/`password` 一律输出 `[REDACTED]`）。
-- 容器内以 `node` 用户运行，不带任何构建工具链。
+- 管理员口令用 `scrypt`（N=16384）加盐哈希，只存 `data/auth.json`；接口与日志从不回显明文（只给 `sk-***abcd` 形式的 hint）。
+- 会话令牌 32 字节随机（`crypto.randomBytes`），只存内存，Cookie 为 `HttpOnly` + `SameSite=Lax`（https 反代下自动加 `Secure`）；改密码会让其它会话全部失效。
+- 同来源登录失败 5 次锁 5 分钟（`429` + `Retry-After`），防止在线爆破。
+- 容器内以 `node` 用户运行，不带任何构建工具链；compose 里可选 `read_only` + `no-new-privileges`。
 - 入站请求体大小受限（`MAX_BODY_BYTES`），避免被大包打爆内存。
-- 网关**不是**多租户鉴权层：请只在内网 / 反代后面暴露，或自行在反代上做鉴权。
-- 设置页默认只允许本机回环访问；远程访问需 `ADMIN_TOKEN`。设置文件含上游密钥，权限 0600（Windows 上 chmod 不生效，依赖目录 ACL / 磁盘加密）。
-- 设置页能改上游地址，等价于 SSRF 入口：只给可信的人访问。
+- **首次初始化窗口**：账号创建前，任何能访问该端口的人都能创建管理员。生产部署请先设 `ADMIN_TOKEN` 或只在信任网络内暴露端口，完成初始化后窗口自动关闭。
+- 设置页能改上游地址，等价于 SSRF 入口：初始化的账号只给可信的人；`gateway_api_key` 只是下游准入，**不是**多租户鉴权层。
 
 ## 11. 发布与 CI（GitHub Actions）
 
@@ -608,14 +627,14 @@ toolcall-gateway/
 | 事件 | 行为 |
 | --- | --- |
 | `pull_request` | 只跑测试（Node 20/22 矩阵、`npm test`、`npm run gate`、密钥扫描），不推镜像 |
-| push 到 `main` | 测试 → 构建并推送 `ghcr.io/<owner>/<repo>:latest` 与 `sha-xxxxxxx` → 镜像冒烟（起容器验 `/healthz` 与 `USER node`） |
-| push tag `v1.2.0` | 同上，并额外推送 `:v1.2.0`、`:1.2.0`、`:1.0` |
+| push 到 `main` | 测试 → 构建并推送 `ghcr.io/<owner>/<repo>:latest` 与 `sha-xxxxxxx` → 镜像冒烟（**零环境变量起容器** → 走完首次初始化 → 重启验持久化） |
+| push tag `v1.3.0` | 同上，并额外推送 `:v1.3.0`、`:1.3` |
 
-发布一个版本（本项目当前版本即 `v1.2.0`）：
+发布一个版本（本项目当前版本即 `v1.3.0`）：
 
 ```bash
-git tag v1.2.0
-git push origin v1.2.0     # 触发构建，产出 ghcr.io/<owner>/<repo>:v1.2.0
+git tag v1.3.0
+git push origin v1.3.0     # 触发构建，产出 ghcr.io/<owner>/<repo>:v1.3.0
 ```
 
 镜像为多架构（`linux/amd64` + `linux/arm64`），带 SBOM 与 provenance。GHCR 使用内置 `GITHUB_TOKEN`（`packages: write`），无需额外 secret。
@@ -625,8 +644,8 @@ git push origin v1.2.0     # 触发构建，产出 ghcr.io/<owner>/<repo>:v1.2.0
 ## 12. 维护者检查清单（发布前）
 
 ```bash
-npm test            # 单元测试（含设置存储）
-npm run gate        # 离线全量 gate（M0~M6 + M8 + M10 + M11）
+npm test            # 单元测试（含设置存储 / 鉴权 / 页面结构）
+npm run gate        # 离线全量 gate（M0~M6 + M8 + M10~M12）
 npm run conformance # 35 项协议矩阵（mock 确定性）
 npm run e2e:codex   # Codex 形状（dry）
 ```

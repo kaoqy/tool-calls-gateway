@@ -1,3 +1,9 @@
+# 本地源码构建 + 运行。零配置即可起：
+#   docker compose up -d --build
+# 之后浏览器打开 http://127.0.0.1:8787/admin 完成初始化（创建管理员 + 填上游）。
+#
+# 所有环境变量都是可选的：想用 env 预置，取消下面 environment 里的注释即可
+# （网页里保存的配置优先级更高，随时可在 /admin 覆盖）。
 services:
   toolcall-gateway:
     build:
@@ -7,10 +13,15 @@ services:
     container_name: toolcall-gateway
     ports:
       - "${HOST_PORT:-8787}:8787"
-    env_file:
-      - .env
     environment:
       PORT: "8787"
+      # UPSTREAM_BASE_URL: "https://api.deepseek.com"
+      # UPSTREAM_API_KEY: "sk-..."
+      # DEFAULT_MODEL: "deepseek-chat"
+      # GATEWAY_API_KEY: ""      # 设了就要求下游带 Bearer
+      # ADMIN_TOKEN: ""          # 设了就多一把可用的管理令牌（自动化/找回）
+      # TOOL_MODE: "auto"
+      # LOG_LEVEL: "info"
     volumes:
       - tcg-data:/app/data
     restart: unless-stopped

@@ -235,6 +235,8 @@ export function createSettingsStore({ env = process.env, filePath, logger = cons
           version,
           envProvided: [...envSet],
           activeOverrides: Object.keys(overrides).filter((k) => overrides[k] !== null && overrides[k] !== undefined),
+          // 是否已经能真正转发（没配上游时 /v1 会明确 503，而不是打到某个默认地址）
+          upstreamConfigured: Boolean(String(cfg.upstreamBaseUrl ?? '').trim()),
         },
       };
     },
