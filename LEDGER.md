@@ -248,6 +248,9 @@
   - 密钥只在保存时单向上行；任何响应/日志都只给 `sk-***abcd`。
   - 设置页默认只允许回环；远程需 `ADMIN_TOKEN`（Bearer），并带 CSP/`x-frame-options` 头。
   - 持久化到 `DATA_DIR/settings.json`（0600，tmp+rename 原子写）；Docker 侧加 `tcg-data:/app/data` 卷。
+- **Docker 实测发现并修复的问题**：容器端口映射（`-p 8787:8787`）下请求来源 IP 是网桥网关（如 `172.17.0.1`），"仅回环"策略会把 `/admin` 挡成 `401`。
+  - 修复：新增 `ADMIN_TOKEN` 登录流——`/admin` 未授权时返回登录页，`POST /admin/api/login` 换 `HttpOnly` Cookie（24h），另支持 `Authorization: Bearer`；`deploy.sh` 在 `.env` 里自动生成令牌并打印。
+  - 验证：CI 冒烟新增"无令牌必须 401 / 带令牌返回设置页与设置 API"，`sh -n deploy.sh` + `bash -n deploy.sh` 语法检查一并进 CI。
 
 ## 5. 未验证项汇总
 
@@ -592,3 +595,13 @@ docker run -d --name toolcall-gateway -p 8787:8787 \
 ```
 
 > 凭据纪律：`GH_TOKEN` 只写在 `toolcall-gateway/.env`（`.gitignore` + `.dockerignore` 双排除），推送脚本与日志均不打印；仓库 36 个文件经扫描不含真实 key。
+
+### 9.1 版本演进（GHCR）
+
+| 版本 | 提交 | CI | manifest digest | 说明 |
+| --- | --- | --- | --- | --- |
+| `v1.0.0` | `0138ac1` | `43675461000` ✅ | `sha256:e2fc0822…` | 首次发布：模拟工具调用网关 + 51 单测 + 离线全量 gate |
+| `v1.1.0` | `d2e37c5` | `43678360516` ⚠️ smoke 失败 | `sha256:f1b98ae8…` | 应用内设置初版。已知问题：Docker 端口映射下 `/admin` 返回 401（仅回环策略），**用 v1.1.1** |
+| `v1.1.1` | `9487663` | `43678695307` ✅ | `sha256:d1a377d6…` | 修复上述问题：`ADMIN_TOKEN` 登录 + HttpOnly Cookie；CI 冒烟覆盖 401/200 与 `deploy.sh` 语法 |
+
+镜像：`ghcr.io/kaoqy/tool-calls-gateway:{v1.1.1,1.1.1,1.1,latest,sha-*}`，平台 `linux/amd64` + `linux/arm64`。
