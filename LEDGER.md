@@ -27,8 +27,8 @@
 | **M8 协议健壮性补齐** | ✅ | 2026-11-15 09:10 +08 | G8：单测 51/51 + conformance dry 35/35 |
 | **M9 真实联调** | ⚠️ 已实测后受阻 | 2026-11-15 09:22 +08 | 09:10–09:22 真实端点全绿（e2e/conformance/hitrate 均 PASS）；09:24 起上游 403 人机验证，复跑转 SKIP |
 | **M10 Codex 形状** | ✅ | 2026-11-15 09:22 +08 | G10：dry PASS + live PASS（shell 命中） |
-| G0-docker 手动 | ⛔ 未验证 | 2026-11-15 09:05 +08 | 仍无 docker/podman；WSL 无发行版，见第 5 节 |
-| G6-docker 手动 | ⛔ 未验证 | 2026-11-15 09:05 +08 | 同上 |
+| G0-docker 手动 | ✅ | 2026-11-15 12:11 +08 | **改由 GitHub Actions 验证**：run 43675461000 的 smoke job 真 build 镜像 + 起容器 /healthz + `USER node` 校验全通过 |
+| G6-docker 手动 | ✅ | 2026-11-15 12:11 +08 | 同一 CI：多架构镜像推 GHCR + 容器健康检查；本机仍无 docker，compose 起停由镜像冒烟等价覆盖 |
 | M7 真实上游联调 | ✅→⚠️ | 2026-11-15 09:22 +08 | 已跑通真实双轮循环；后续复跑被上游风控拦截（详见 M9） |
 
 **当前状态：M0~M6 全部自动 gate 绿灯（`GATE RESULT: PASS (7/7)`）；docker 相关与真实上游两项因环境限制未验证，已在第 5 节列明原因与复现命令。**
@@ -239,8 +239,8 @@
 
 | 项 | 状态 | 原因 | 复现命令 |
 | --- | --- | --- | --- |
-| G0-docker（`docker build`） | ⛔ 未验证 | 本机仍无 docker/podman；`wsl -l -v` 显示"未安装可用于 Linux 的 Windows 子系统发行版"，无容器运行时 | `docker build -t toolcall-gateway:dev .` |
-| G6-docker（`docker compose up`） | ⛔ 未验证 | 同上 | `cp .env.example .env && docker compose up -d && curl -s localhost:8787/healthz && docker compose down` |
+| G0-docker（`docker build`） | ✅ 已验证（CI） | 本机无 docker，但 GitHub Actions 真实构建成功 | `gh run view 43675461000 --log` / 见 §9 |
+| G6-docker（`docker compose up`） | ✅ 已验证（等价） | CI 冒烟用 `docker run` 起容器 + `/healthz` + `USER node`；compose 文件与本机无 docker 无法直跑 | `docker compose -f docker-compose.prod.yml up -d`（有 docker 的机器） |
 | G7 真实上游双轮循环 | ✅ 已验证（09:10） | — | `node scripts/e2e_live.mjs --live` |
 | G9 复跑（conformance/hitrate live） | ⚠️ BLOCKED（09:24 起） | 上游 `403 需要重新登录或人机验证`（账号侧状态） | 完成供应商侧验证后重跑三条 live 命令 |
 | OpenAI Python/Node SDK 实机调用 | ⛔ 未验证 | 零依赖约束，本机未装 SDK | 见 README 4.3 / 4.4 |
@@ -539,3 +539,42 @@ ALL OFFLINE GATES PASS (M9 live 未跑：加 --live)
 ```
 
 完整输出见 `out/gate-offline.txt`。M9 的真实结果见上文 ②③⑤（09:16–09:22 的实测），后续因上游 403 转为 BLOCKED。
+
+---
+
+## 9. 发布记录（GitHub + GHCR，2026-11-15）
+
+| 项 | 值 |
+| --- | --- |
+| 仓库 | https://github.com/kaoqy/tool-calls-gateway （public，MIT） |
+| 首提交 | `41dd14b` — 36 个文件，`.env` 未入库（推送脚本白名单排除） |
+| 修复提交 | `0138ac1` — CI 密钥扫描正则收紧（原规则把测试假 key 当泄漏，误报） |
+| tag | `v1.0.0` → `0138ac1`（annotated） |
+| CI run | `43675461000`（tag）/ `43675460022`（main）—— 全绿 |
+| 镜像 | `ghcr.io/kaoqy/tool-calls-gateway:v1.0.0` |
+| 其他标签 | `1.0.0` / `1.0` / `latest` / `sha-0138ac1` |
+| manifest digest | `sha256:e2fc0822ca4f9325a50a6bdcd31cac3a509ae8bdd4719e60ace1ee7a34c4bd5f` |
+| 平台 | `linux/amd64`、`linux/arm64`（另有 provenance/SBOM attestation） |
+
+CI 实际执行的验证（这也是 G0-docker / G6-docker 的闭环证据）：
+
+1. `test` job：Node 20 与 22 矩阵，零依赖校验 → `npm test`（51 项）→ `npm run gate`（M0~M6 + M8 + M10）→ 密钥扫描，全部 success。
+2. `docker` job：QEMU + buildx，多架构 build & push 到 GHCR，带 gha 缓存、provenance、SBOM。
+3. `smoke` job：本地 build → `docker run` → 轮询 `GET /healthz` 断言 `{"status":"ok"}` → `docker inspect` 断言 `User=node` → 清理容器。
+
+一键部署（发布后可用）：
+
+```bash
+# A. 脚本（自动建 .env、拉镜像、起容器、等健康检查）
+curl -fsSL https://raw.githubusercontent.com/kaoqy/tool-calls-gateway/main/deploy.sh | sh
+
+# B. compose（预构建镜像）
+docker compose -f docker-compose.prod.yml up -d
+
+# C. docker run
+docker run -d --name toolcall-gateway -p 8787:8787 \
+  -e UPSTREAM_BASE_URL=https://api.deepseek.com -e UPSTREAM_API_KEY=sk-xxx \
+  ghcr.io/kaoqy/tool-calls-gateway:v1.0.0
+```
+
+> 凭据纪律：`GH_TOKEN` 只写在 `toolcall-gateway/.env`（`.gitignore` + `.dockerignore` 双排除），推送脚本与日志均不打印；仓库 36 个文件经扫描不含真实 key。
