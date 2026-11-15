@@ -1,9 +1,9 @@
-﻿# 生产用 compose：直接拉取已发布的镜像，无需源码构建。
+# 生产用 compose：直接拉取已发布的镜像，无需源码构建。
 #   docker compose -f docker-compose.prod.yml up -d
 # 零配置即可起；打开 http://<host>:8787/admin 创建管理员并填写上游即可使用。
 services:
   toolcall-gateway:
-    image: ${TCG_IMAGE:-ghcr.io/kaoqy/tool-calls-gateway:v1.4.0}
+    image: ${TCG_IMAGE:-ghcr.io/kaoqy/tool-calls-gateway:v1.5.0}
     container_name: toolcall-gateway
     ports:
       - "${HOST_PORT:-8787}:8787"

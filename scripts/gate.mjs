@@ -204,6 +204,15 @@ async function gateM14() {
   if (ok) console.log('GATE M14 PASS');
 }
 
+// ---------------------------------------------------------------- M15（控制台：概览 / 测试台）
+async function gateM15() {
+  const unit = runNode('metrics test', ['--test', 'test/metrics.test.mjs']);
+  const e2e = runNode('console e2e', ['scripts/e2e_console.mjs']);
+  const ok = unit.ok && e2e.ok;
+  record('M15', '控制台：概览指标 + 请求测试台 + 接入片段', ok, ok ? '11 项单测 + 21 项 e2e' : '见上方输出');
+  if (ok) console.log('GATE M15 PASS');
+}
+
 const ALL = [
   ['M0', gateM0],
   ['M1', gateM1],
@@ -218,6 +227,7 @@ const ALL = [
   ['M11', gateM11],
   ['M12', gateM12],
   ['M14', gateM14],
+  ['M15', gateM15],
 ];
 
 async function main() {

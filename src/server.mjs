@@ -45,6 +45,7 @@ import {
   mediaSizeStats,
   normalizeContent,
 } from './content.mjs';
+import { createMetrics } from './metrics.mjs';
 
 /** 发送 JSON 响应 */
 export function sendJson(res, status, obj, headers = {}) {
@@ -130,7 +131,7 @@ async function pipeUpstreamStream(res, opened, logger) {
   }
 }
 
-export function createServer({ settings, config = defaultConfig, logger = defaultLogger, auth, sessions, limiter } = {}) {
+export function createServer({ settings, config = defaultConfig, logger = defaultLogger, auth, sessions, limiter, metrics } = {}) {
   // 有 settings 时每个请求都取最新配置（UI 保存后立即热生效，无需重启）
   const getConfig = typeof settings?.get === 'function' ? () => settings.get() : () => config;
   const active = getConfig();
@@ -142,7 +143,16 @@ export function createServer({ settings, config = defaultConfig, logger = defaul
     });
   const sessionStore = sessions ?? createSessionStore({ ttlMs: DEFAULT_SESSION_TTL_MS });
   const loginLimiter = limiter ?? createLoginLimiter({});
-  const ctx = { getConfig, settings, logger, auth: authStore, sessions: sessionStore, limiter: loginLimiter };
+  const metricsStore = metrics ?? createMetrics();
+  const ctx = {
+    getConfig,
+    settings,
+    logger,
+    auth: authStore,
+    sessions: sessionStore,
+    limiter: loginLimiter,
+    metrics: metricsStore,
+  };
   const server = http.createServer((req, res) => {
     handleRequest(req, res, ctx).catch((err) => {
       logger.error('unhandled request error', { message: err?.message ?? String(err) });
@@ -151,6 +161,7 @@ export function createServer({ settings, config = defaultConfig, logger = defaul
   });
   server.adminState = () => authStore.summary();
   server.sessions = sessionStore;
+  server.metrics = metricsStore;
   return server;
 }
 
@@ -160,6 +171,7 @@ function rejectUnauthorized(req, res, config) {
   const header = String(req.headers.authorization ?? '');
   const token = header.replace(/^Bearer\s+/i, '').trim();
   if (token && token === config.gatewayApiKey) return false;
+  if (res.__tcg) res.__tcg.errorType = 'invalid_api_key';
   sendError(res, 401, 'invalid_api_key', '无效的网关 API key（请使用 Authorization: Bearer <GATEWAY_API_KEY>）');
   return true;
 }
@@ -304,9 +316,34 @@ async function handleRequest(req, res, ctx) {
   const url = new URL(req.url ?? '/', 'http://127.0.0.1');
   logger.debug('request', { method: req.method, path: url.pathname });
 
+  // 请求摘要：只统计 /v1/*（下游流量），/admin 与 /healthz 不计入
+  const startedAt = Date.now();
+  const tracking = {
+    method: req.method,
+    path: url.pathname,
+    model: typeof req.__model === 'string' ? req.__model : '',
+    stream: false,
+    simulated: false,
+    toolCalls: 0,
+    finish: '',
+    images: 0,
+    files: 0,
+    audios: 0,
+    unknownParts: 0,
+    errorType: '',
+  };
+  res.__tcg = tracking;
+  if (url.pathname.startsWith('/v1/')) {
+    res.once('finish', () => {
+      ctx.metrics?.record({ ...tracking, status: res.statusCode, ms: Date.now() - startedAt });
+    });
+  }
+
   if (req.method === 'GET' && url.pathname === '/healthz') {
     return sendJson(res, 200, {
       status: 'ok',
+      version: packageVersion() || 'dev',
+      uptimeMs: Math.max(0, Date.now() - (rctx.metrics?.startedAt ?? Date.now())),
       setupRequired: setupRequired(rctx),
       upstreamConfigured: Boolean(String(config.upstreamBaseUrl ?? '').trim()),
       // 图片处理模式：pass（默认，原样转发）/ placeholder（占位文本）/ reject（400）
@@ -377,6 +414,7 @@ async function handleRequest(req, res, ctx) {
 /** 没配上游时给出可操作的 503，而不是打到一个猜的默认地址 */
 function rejectUnconfigured(res, config) {
   if (String(config.upstreamBaseUrl ?? '').trim()) return false;
+  if (res.__tcg) res.__tcg.errorType = 'upstream_not_configured';
   sendError(
     res,
     503,
@@ -627,6 +665,25 @@ async function handleAdminApi(req, res, url, ctx) {
     return handleAdminVisionTest(req, res, ctx);
   }
 
+  if (pathname === '/admin/api/metrics' && req.method === 'GET') {
+    const limit = Number.parseInt(url.searchParams.get('limit') ?? '30', 10);
+    return sendJson(res, 200, {
+      summary: ctx.metrics.summary(),
+      recent: ctx.metrics.list({ limit }),
+      upstreamConfigured: Boolean(String(config.upstreamBaseUrl ?? '').trim()),
+    });
+  }
+
+  if (pathname === '/admin/api/metrics/reset' && req.method === 'POST') {
+    const summary = ctx.metrics.reset();
+    logger.info('metrics reset');
+    return sendJson(res, 200, { ok: true, summary });
+  }
+
+  if (pathname === '/admin/api/playground' && req.method === 'POST') {
+    return handleAdminPlayground(req, res, ctx);
+  }
+
   return sendError(res, 404, 'not_found', `未知设置接口: ${req.method} ${pathname}`);
 }
 
@@ -763,22 +820,34 @@ async function handleChatCompletions(req, res, config, logger) {
   try {
     body = JSON.parse(raw.toString('utf8') || '{}');
   } catch {
+    if (res.__tcg) res.__tcg.errorType = 'invalid_json';
     return sendError(res, 400, 'invalid_json', '请求体不是合法 JSON');
   }
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    if (res.__tcg) res.__tcg.errorType = 'invalid_request_error';
     return sendError(res, 400, 'invalid_request_error', '请求体必须是 JSON 对象');
   }
   if (!Array.isArray(body.messages)) {
+    if (res.__tcg) res.__tcg.errorType = 'invalid_request_error';
     return sendError(res, 400, 'invalid_request_error', '缺少 messages 数组');
   }
 
   // 内存保护：图片数量 / 单 part 体积超限直接拒绝，避免 base64 撑爆进程
   const mediaCounts = countMediaInBody(body);
   const mediaSizes = mediaSizeStats(body);
+  if (res.__tcg) {
+    res.__tcg.model = typeof body.model === 'string' ? body.model : '';
+    res.__tcg.stream = body.stream === true;
+    res.__tcg.images = mediaCounts.images;
+    res.__tcg.files = mediaCounts.files;
+    res.__tcg.audios = mediaCounts.audios;
+    res.__tcg.unknownParts = mediaCounts.unknownParts;
+  }
   const maxImages = config.maxImagesPerRequest ?? 8;
   const maxPartBytes = config.maxMediaPartBytes ?? 8 * 1024 * 1024;
   if (mediaCounts.images > maxImages) {
     logger.warn('media guard: too many images', { images: mediaCounts.images, limit: maxImages });
+    if (res.__tcg) res.__tcg.errorType = 'media_too_many';
     return sendError(res, 413, 'payload_too_large', `单次请求图片过多或过大（图片 ${mediaCounts.images} 张，上限 ${maxImages} 张）`, {
       images: mediaCounts.images,
       limit: maxImages,
@@ -786,6 +855,7 @@ async function handleChatCompletions(req, res, config, logger) {
   }
   if (mediaSizes.maxPartBytes > maxPartBytes) {
     logger.warn('media guard: media part too large', { bytes: mediaSizes.maxPartBytes, limit: maxPartBytes });
+    if (res.__tcg) res.__tcg.errorType = 'media_part_too_large';
     return sendError(
       res,
       413,
@@ -796,8 +866,10 @@ async function handleChatCompletions(req, res, config, logger) {
   }
 
   const simulate = config.toolMode !== 'off' && hasTools(body);
+  if (res.__tcg) res.__tcg.simulated = simulate;
   if (simulate && config.imageMode === 'reject' && hasMedia(body)) {
     logger.warn('imageMode=reject blocked a media request', mediaCounts);
+    if (res.__tcg) res.__tcg.errorType = 'vision_unsupported';
     return sendError(res, 400, 'vision_unsupported', '当前 imageMode=reject，已拒绝含媒体的请求', {
       imageMode: 'reject',
       media: mediaCounts,
@@ -861,9 +933,11 @@ async function handlePassthrough(req, res, config, logger, raw, body) {
 function handleUpstreamFailure(res, err, logger) {
   if (err?.code === 'UPSTREAM_TIMEOUT') {
     logger.warn('upstream timeout', { message: err.message });
+    if (res.__tcg) res.__tcg.errorType = 'upstream_timeout';
     return sendError(res, 504, 'upstream_timeout', '上游响应超时');
   }
   logger.warn('upstream failure', { message: err?.message ?? String(err) });
+  if (res.__tcg) res.__tcg.errorType = 'upstream_error';
   return sendError(res, 502, 'upstream_error', `上游请求失败: ${err?.message ?? err}`);
 }
 
@@ -1104,6 +1178,11 @@ async function handleSimulated(req, res, config, logger, body) {
         finish: completion.choices[0].finish_reason,
         toolCalls: parsed.toolCalls.length,
       });
+      if (res.__tcg) {
+        res.__tcg.simulated = true;
+        res.__tcg.toolCalls = parsed.toolCalls.length;
+        res.__tcg.finish = completion.choices[0].finish_reason ?? '';
+      }
       return sendJson(res, 200, completion);
     }
 
@@ -1144,6 +1223,11 @@ async function handleSimulated(req, res, config, logger, body) {
       chunks: chunks.length,
       toolCalls: parsed.toolCalls.length,
     });
+    if (res.__tcg) {
+      res.__tcg.simulated = true;
+      res.__tcg.toolCalls = parsed.toolCalls.length;
+      res.__tcg.finish = parsed.finishReason ?? '';
+    }
   } catch (err) {
     if (err?.upstreamStatus) {
       const sentMedia = mediaCounts.images + mediaCounts.files > 0;
@@ -1154,6 +1238,7 @@ async function handleSimulated(req, res, config, logger, body) {
           files: mediaCounts.files,
           mode: config.imageMode,
         });
+        if (res.__tcg) res.__tcg.errorType = 'upstream_vision_unsupported';
         return sendError(
           res,
           err.upstreamStatus,
@@ -1171,6 +1256,96 @@ async function handleSimulated(req, res, config, logger, body) {
       return;
     }
     handleUpstreamFailure(res, err, logger);
+  }
+}
+
+/**
+ * 请求测试台：在 /admin 里直接发一条真实请求，看网关吐回什么（不落盘、不进 /v1 统计）。
+ * 支持纯文本与带 tools 的模拟模式，也支持多模态 part —— 与真实链路完全同一条代码路径。
+ */
+async function handleAdminPlayground(req, res, ctx) {
+  const { config, logger } = ctx;
+  const parsed = await readJsonBody(req, Math.min(config.maxBodyBytes || 16 * 1024 * 1024, 32 * 1024 * 1024));
+  if (parsed.error) return sendError(res, parsed.error.status, parsed.error.type, parsed.error.message);
+  const body = parsed.json?.request ?? parsed.json;
+  if (!body || typeof body !== 'object' || Array.isArray(body) || !Array.isArray(body.messages)) {
+    return sendError(res, 400, 'invalid_request_error', '需要 {request: {messages: [...]}} 形状的请求体');
+  }
+
+  const media = countMediaInBody(body);
+  const withMedia = media.images + media.files + media.audios > 0;
+  const runConfig = {
+    ...config,
+    requestTimeoutMs: withMedia
+      ? Math.max(Number(config.requestTimeoutMs) || 60000, Number(config.mediaTimeoutMs) || 120000)
+      : config.requestTimeoutMs,
+  };
+  const started = Date.now();
+  const simulated = config.toolMode !== 'off' && hasTools(body);
+
+  try {
+    const built = buildUpstreamRequest(body, { ...runConfig, logger });
+    if (!built.simulated) {
+      const result = await callUpstreamJson({
+        url: built.url,
+        headers: built.headers,
+        body: JSON.stringify(built.body),
+        timeoutMs: runConfig.requestTimeoutMs,
+      });
+      const json = safeParseJson(result.text);
+      return sendJson(res, 200, {
+        ok: result.status < 400,
+        status: result.status,
+        latencyMs: Date.now() - started,
+        simulated: false,
+        media,
+        response: json ?? String(result.text ?? '').slice(0, 4000),
+      });
+    }
+
+    const result = await runUpstreamOnce({ config: runConfig, upstreamBody: built.body });
+    const parsedOut = resolveToolCalls(result);
+    const completion = buildChatCompletion({
+      model: result.model ?? built.body.model,
+      content: parsedOut.content,
+      toolCalls: parsedOut.toolCalls,
+      finishReason: parsedOut.finishReason,
+      usage: result.usage ?? null,
+      reasoning: result.reasoning ?? null,
+      reasoningKey: result.reasoningKey,
+    });
+    logger.info('playground run', {
+      simulated: true,
+      finish: completion.choices[0].finish_reason,
+      toolCalls: parsedOut.toolCalls.length,
+      images: media.images,
+      latencyMs: Date.now() - started,
+    });
+    return sendJson(res, 200, {
+      ok: true,
+      status: 200,
+      latencyMs: Date.now() - started,
+      simulated: true,
+      media,
+      response: completion,
+    });
+  } catch (err) {
+    if (err?.upstreamStatus) {
+      const vision = isVisionRejection(err.upstreamStatus, err.upstreamText);
+      return sendJson(res, 200, {
+        ok: false,
+        status: err.upstreamStatus,
+        latencyMs: Date.now() - started,
+        simulated,
+        media,
+        error: {
+          type: vision ? 'upstream_vision_unsupported' : 'upstream_error',
+          message: vision ? '上游模型可能不支持图片输入（可在网关分区把 imageMode 改成 placeholder）' : `上游返回 HTTP ${err.upstreamStatus}`,
+          upstream: sanitizeUpstreamSnippet(err.upstreamText),
+        },
+      });
+    }
+    return sendSettingsError(res, err);
   }
 }
 

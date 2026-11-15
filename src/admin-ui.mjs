@@ -17,6 +17,17 @@ const COMMON_CSS = `
       --accent-soft:rgba(91,140,255,.12); --shadow:0 8px 24px rgba(23,32,51,.08);
     }
   }
+  /* 手动主题：覆盖系统偏好（顶栏按钮切换，存在 localStorage） */
+  :root[data-theme="light"]{
+    --bg:#f5f7fb; --bg-soft:#eef1f7; --panel:#ffffff; --panel-2:#f7f9fc; --line:#dfe4ee;
+    --line-soft:#e9edf5; --text:#172033; --muted:#5c6880; --faint:#8b96ab;
+    --accent-soft:rgba(91,140,255,.12); --shadow:0 8px 24px rgba(23,32,51,.08);
+  }
+  :root[data-theme="dark"]{
+    --bg:#0a0c11; --bg-soft:#0e1118; --panel:#12161f; --panel-2:#171c27; --line:#232a38;
+    --line-soft:#1b2130; --text:#e9eef8; --muted:#8b96ab; --faint:#5d6a80;
+    --accent-soft:rgba(91,140,255,.14); --shadow:0 10px 30px rgba(0,0,0,.35);
+  }
   *{box-sizing:border-box}
   html,body{height:100%}
   body{
@@ -149,7 +160,33 @@ const COMMON_CSS = `
     .topbar{padding:10px 14px}
     .savebar{padding:10px 14px}
     .fileline{display:none}
+    .cards{grid-template-columns:repeat(2,minmax(0,1fr))}
   }
+
+  /* ---- 概览 ---- */
+  .cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:14px}
+  .stat{border:1px solid var(--line-soft);border-radius:var(--radius-sm);padding:11px 13px;background:var(--panel-2);display:grid;gap:3px}
+  .stat .k{font-size:11px;color:var(--faint);letter-spacing:.04em}
+  .stat .v{font-size:18px;font-weight:650;font-family:var(--mono);line-height:1.2}
+  .stat .s{font-size:11.5px;color:var(--muted)}
+  .stat.ok .v{color:var(--ok)} .stat.warn .v{color:var(--warn)} .stat.err .v{color:var(--err)}
+
+  .req-table{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px}
+  .req-table th{text-align:left;color:var(--muted);font-weight:500;font-size:11px;letter-spacing:.04em;padding:6px 8px;border-bottom:1px solid var(--line-soft);white-space:nowrap}
+  .req-table td{padding:6px 8px;border-bottom:1px solid var(--line-soft);font-family:var(--mono);font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:22ch}
+  .req-table tr:last-child td{border-bottom:0}
+  .req-table .ok{color:var(--ok)} .req-table .warn{color:var(--warn)} .req-table .err{color:var(--err)}
+  .req-wrap{max-height:320px;overflow:auto;border:1px solid var(--line-soft);border-radius:10px;margin-top:10px}
+  .empty{padding:18px;text-align:center;color:var(--faint);font-size:12.5px}
+
+  /* ---- 测试台 / 接入标签页 ---- */
+  .tabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px}
+  .tab{border:1px solid var(--line);background:var(--panel-2);color:var(--muted);border-radius:999px;padding:5px 12px;font-size:12px;cursor:pointer;font-family:inherit}
+  .tab.active{background:var(--accent-soft);border-color:rgba(91,140,255,.4);color:var(--text);font-weight:600}
+  .mono-block{background:var(--panel-2);border:1px solid var(--line-soft);border-radius:10px;padding:12px 14px;font-family:var(--mono);font-size:12px;white-space:pre-wrap;word-break:break-all;color:var(--muted);max-height:340px;overflow:auto}
+  .rowline{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .toggle{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--muted);cursor:pointer;user-select:none}
+  .toggle input{accent-color:var(--accent)}
 `;
 
 /** 首次运行：创建管理员 + 填上游，一个页面两步搞定 */
@@ -451,6 +488,7 @@ export function renderAdminHtml({ version = '', username = '' } = {}) {
     <span class="chip" id="chip-admin"><span class="dot"></span><span id="chip-admin-text">…</span></span>
     <span class="chip" id="chip-user"><span class="dot"></span><span id="chip-user-text">${escapeAttr(username)}</span></span>
     <span class="fileline" id="file" title=""></span>
+    <button class="link" id="btn-theme" title="切换主题">主题：自动</button>
     <button class="link" id="btn-logout">退出登录</button>
   </div>
 </header>
@@ -467,15 +505,57 @@ export function renderAdminHtml({ version = '', username = '' } = {}) {
       </dl>
     </div>
     <nav class="nav" aria-label="分区">
-      <a href="#upstream" class="active">上游</a>
+      <a href="#overview" class="active">概览</a>
+      <a href="#upstream">上游</a>
       <a href="#gateway">网关</a>
       <a href="#selftest">自检</a>
+      <a href="#playground">测试台</a>
       <a href="#about">接入</a>
       <a href="#account">账号</a>
     </nav>
   </aside>
 
   <main class="main" style="display:grid;gap:18px">
+    <section class="card" id="overview">
+      <header>
+        <h2>概览</h2>
+        <span class="chip sm" id="ov-live"><span class="dot"></span>进程内统计</span>
+        <span class="sub">只统计 /v1/* 的下游流量，重启清零</span>
+      </header>
+      <div class="body" style="padding-top:14px">
+        <div class="cards">
+          <div class="stat"><span class="k">运行时长</span><span class="v" id="ov-uptime">—</span><span class="s" id="ov-start">—</span></div>
+          <div class="stat"><span class="k">请求数</span><span class="v" id="ov-requests">—</span><span class="s" id="ov-requests-sub">—</span></div>
+          <div class="stat" id="ov-error-stat"><span class="k">错误率</span><span class="v" id="ov-error">—</span><span class="s" id="ov-error-sub">—</span></div>
+          <div class="stat" id="ov-tool-stat"><span class="k">工具命中率</span><span class="v" id="ov-tool">—</span><span class="s" id="ov-tool-sub">—</span></div>
+          <div class="stat"><span class="k">延迟 P50</span><span class="v" id="ov-p50">—</span><span class="s">最近 100 条</span></div>
+          <div class="stat"><span class="k">延迟 P95</span><span class="v" id="ov-p95">—</span><span class="s">最近 100 条</span></div>
+          <div class="stat"><span class="k">媒体转发</span><span class="v" id="ov-media">—</span><span class="s" id="ov-media-sub">—</span></div>
+          <div class="stat"><span class="k">工具调用</span><span class="v" id="ov-calls">—</span><span class="s" id="ov-calls-sub">—</span></div>
+        </div>
+
+        <div class="rowline" style="justify-content:space-between">
+          <div class="rowline">
+            <button class="btn" id="btn-ov-refresh" type="button">刷新</button>
+            <button class="btn ghost danger" id="btn-ov-reset" type="button">清零</button>
+            <label class="toggle"><input type="checkbox" id="ov-auto" checked> 每 5s 自动刷新</label>
+          </div>
+          <span class="muted" style="font-size:12px" id="ov-updated">尚未加载</span>
+        </div>
+
+        <div class="req-wrap">
+          <table class="req-table" id="ov-table">
+            <thead>
+              <tr><th>时间</th><th>路径</th><th>状态</th><th>耗时</th><th>模型</th><th>模式</th><th>工具</th><th>媒体</th><th>错误</th></tr>
+            </thead>
+            <tbody id="ov-rows"></tbody>
+          </table>
+          <div class="empty" id="ov-empty">还没有下游请求。用 curl 或「测试台」发一条试试。</div>
+        </div>
+        <p class="hint" style="margin-top:10px">这里只记请求形状（状态码、耗时、模型名、工具/媒体计数、错误类型），<b>不记录任何提示词、图片内容或密钥</b>。</p>
+      </div>
+    </section>
+
     <section class="card" id="upstream">
       <header>
         <h2>上游</h2>
@@ -616,6 +696,26 @@ export function renderAdminHtml({ version = '', username = '' } = {}) {
       </div>
     </section>
 
+    <section class="card" id="playground">
+      <header><h2>测试台</h2><span class="chip sm" id="pg-mode"></span><span class="sub">直接发一条真实请求，看网关吐回什么</span></header>
+      <div class="body">
+        <p class="hint" style="margin:0 0 8px">走的是和 <code>POST /v1/chat/completions</code> 完全相同的链路（含提示词注入 / 解析 / 合成）。带 <code>tools</code> 就是模拟模式，不带就是纯透传。</p>
+        <textarea id="pg-input" spellcheck="false" style="min-height:210px"></textarea>
+        <div class="row" style="margin-top:10px">
+          <button class="btn primary" id="btn-pg-send" type="button">发送</button>
+          <button class="btn ghost" id="btn-pg-tool" type="button">填入工具示例</button>
+          <button class="btn ghost" id="btn-pg-image" type="button">填入图片示例</button>
+          <button class="btn ghost" id="btn-pg-format" type="button">格式化</button>
+          <button class="btn ghost" id="btn-pg-clear" type="button">清空结果</button>
+          <span class="chip warn"><span class="dot"></span>会真实调用上游</span>
+        </div>
+        <div class="rowline" style="margin-top:10px">
+          <span class="muted" style="font-size:12px" id="pg-status">未发送</span>
+        </div>
+        <div class="mono-block" id="pg-output" style="margin-top:8px;display:none"></div>
+      </div>
+    </section>
+
     <section class="card" id="about">
       <header><h2>接入</h2><span class="sub">下游客户端指向这里</span></header>
       <div class="body">
@@ -624,10 +724,18 @@ export function renderAdminHtml({ version = '', username = '' } = {}) {
           <div class="row2"><span class="k">Chat Completions</span><span class="v" id="ep-chat">—</span><button class="btn ghost" data-copy="ep-chat">复制</button></div>
           <div class="row2"><span class="k">健康检查</span><span class="v" id="ep-health">—</span><button class="btn ghost" data-copy="ep-health">复制</button></div>
         </div>
-        <p class="hint" style="margin-top:12px">curl 示例（带 tools，网关会把 <code>&lt;tool_call&gt;</code> 翻译成标准 tool_calls）：</p>
-        <div class="pre" id="curl-example"></div>
-        <div class="row" style="margin-top:10px"><button class="btn ghost" data-copy="curl-example">复制 curl</button></div>
-        <p class="hint" style="margin-top:14px">Python / Node SDK 的 <code>base_url</code> 填上面的 Base URL，<code>api_key</code> 填「下游鉴权 Key」（未设置时随便填一个非空值）。</p>
+        <p class="hint" style="margin-top:14px">下游客户端拿着 Base URL 和 Key 就能用；下面是四种常见接法的可复制片段。</p>
+        <div class="tabs" id="snip-tabs">
+          <button class="tab active" type="button" data-snip="curl">curl</button>
+          <button class="tab" type="button" data-snip="python">Python SDK</button>
+          <button class="tab" type="button" data-snip="node">Node SDK</button>
+          <button class="tab" type="button" data-snip="codex">Codex config</button>
+        </div>
+        <div class="mono-block" id="snip-box">—</div>
+        <div class="row" style="margin-top:10px">
+          <button class="btn ghost" id="btn-snip-copy" type="button">复制当前片段</button>
+          <span class="muted" style="font-size:12px" id="snip-note"></span>
+        </div>
       </div>
     </section>
 
@@ -851,32 +959,105 @@ export function renderAdminHtml({ version = '', username = '' } = {}) {
     setText('ep-chat', origin + '/v1/chat/completions');
     setText('ep-health', origin + '/healthz');
     var model = s.defaultModel || 'deepseek-chat';
-    var NL = String.fromCharCode(10);
-    var BS = String.fromCharCode(92); // 反斜杠
-    var SQ = String.fromCharCode(39); // 单引号
-    var payload = {
-      model: model,
-      messages: [{ role: 'user', content: '北京天气？' }],
-      tools: [{
-        type: 'function',
-        function: {
-          name: 'get_weather',
-          description: '查天气',
-          parameters: { type: 'object', properties: { city: { type: 'string' } }, required: ['city'] },
-        },
-      }],
-    };
-    $('curl-example').textContent = [
-      'curl -s ' + origin + '/v1/chat/completions ' + BS,
-      '  -H "content-type: application/json" ' + BS,
-      '  -H "authorization: Bearer ' + (gw.set ? '你的网关 Key' : 'any') + '" ' + BS,
-      '  -d ' + SQ + JSON.stringify(payload) + SQ,
-    ].join(NL);
+    SNIPPETS = buildSnippets(origin, model, gw.set);
+    renderSnippet();
 
     snapshot = JSON.stringify(collect());
     $('dirty').textContent = '已加载 ' + (n ? n + ' 项覆盖' : '（当前完全来自 env/默认值）');
     $('dirty').className = 'state';
     $('btn-save').disabled = true;
+  }
+
+  var SNIPPETS = {};
+  var SNIP_ACTIVE = 'curl';
+  var SNIP_NOTES = {
+    curl: '带 tools 的请求：网关会把 <tool_call> 翻成标准 tool_calls',
+    python: 'openai Python SDK：base_url 要带 /v1',
+    node: 'openai Node SDK：同样把 baseURL 指到 /v1',
+    codex: 'Codex 类应用的 ~/.codex/config.toml（model 随便写，网关按映射表改写）',
+  };
+
+  function buildSnippets(origin, model, hasGatewayKey) {
+    var NL = String.fromCharCode(10);
+    var BS = String.fromCharCode(92);
+    var SQ = String.fromCharCode(39);
+    var DQ = String.fromCharCode(34);
+    var key = hasGatewayKey ? '你的网关 Key' : 'any';
+    var tools = [{
+      type: 'function',
+      function: {
+        name: 'get_weather',
+        description: '查天气',
+        parameters: { type: 'object', properties: { city: { type: 'string' } }, required: ['city'] },
+      },
+    }];
+    var payload = { model: model, messages: [{ role: 'user', content: '北京天气？' }], tools: tools };
+
+    var curl = [
+      'curl -s ' + origin + '/v1/chat/completions ' + BS,
+      '  -H ' + DQ + 'content-type: application/json' + DQ + ' ' + BS,
+      '  -H ' + DQ + 'authorization: Bearer ' + key + DQ + ' ' + BS,
+      '  -d ' + SQ + JSON.stringify(payload) + SQ,
+    ].join(NL);
+
+    var python = [
+      'from openai import OpenAI',
+      '',
+      'client = OpenAI(',
+      '    base_url=' + DQ + origin + '/v1' + DQ + ',',
+      '    api_key=' + DQ + key + DQ + ',  # 未设置下游鉴权时随便填一个非空值',
+      ')',
+      '',
+      'resp = client.chat.completions.create(',
+      '    model=' + DQ + model + DQ + ',',
+      '    messages=[{' + DQ + 'role' + DQ + ': ' + DQ + 'user' + DQ + ', ' + DQ + 'content' + DQ + ': ' + DQ + '北京天气？' + DQ + '}],',
+      '    tools=[{',
+      '        ' + DQ + 'type' + DQ + ': ' + DQ + 'function' + DQ + ',',
+      '        ' + DQ + 'function' + DQ + ': {',
+      '            ' + DQ + 'name' + DQ + ': ' + DQ + 'get_weather' + DQ + ',',
+      '            ' + DQ + 'parameters' + DQ + ': {' + DQ + 'type' + DQ + ': ' + DQ + 'object' + DQ + ', ' + DQ + 'properties' + DQ + ': {' + DQ + 'city' + DQ + ': {' + DQ + 'type' + DQ + ': ' + DQ + 'string' + DQ + '}}},',
+      '        },',
+      '    }],',
+      ')',
+      'print(resp.choices[0].message.tool_calls)',
+    ].join(NL);
+
+    var nodeSnippet = [
+      'import OpenAI from ' + SQ + 'openai' + SQ + ';',
+      '',
+      'const client = new OpenAI({',
+      '  baseURL: ' + SQ + origin + '/v1' + SQ + ',',
+      '  apiKey: ' + SQ + key + SQ + ',',
+      '});',
+      '',
+      'const resp = await client.chat.completions.create({',
+      '  model: ' + SQ + model + SQ + ',',
+      '  messages: [{ role: ' + SQ + 'user' + SQ + ', content: ' + SQ + '北京天气？' + SQ + ' }],',
+      '  tools: [{ type: ' + SQ + 'function' + SQ + ', function: { name: ' + SQ + 'get_weather' + SQ + ', parameters: { type: ' + SQ + 'object' + SQ + ', properties: { city: { type: ' + SQ + 'string' + SQ + ' } } } } }],',
+      '});',
+      'console.log(resp.choices[0].message.tool_calls);',
+    ].join(NL);
+
+    var codex = [
+      '# ~/.codex/config.toml',
+      'model = ' + DQ + 'gpt-5-codex' + DQ,
+      'model_provider = ' + DQ + 'tcg' + DQ,
+      '',
+      '[model_providers.tcg]',
+      'name = ' + DQ + 'toolcall-gateway' + DQ,
+      'base_url = ' + DQ + origin + '/v1' + DQ,
+      'env_key = ' + DQ + 'TCG_API_KEY' + DQ,
+      '',
+      '# export TCG_API_KEY=' + (hasGatewayKey ? '<你的网关 Key>' : 'any'),
+    ].join(NL);
+
+    return { curl: curl, python: python, node: nodeSnippet, codex: codex };
+  }
+
+  function renderSnippet() {
+    var text = SNIPPETS[SNIP_ACTIVE] || '';
+    $('snip-box').textContent = text || '—';
+    $('snip-note').textContent = SNIP_NOTES[SNIP_ACTIVE] || '';
   }
 
   function collect() {
@@ -1001,6 +1182,9 @@ export function renderAdminHtml({ version = '', username = '' } = {}) {
   });
 
   document.querySelectorAll('input, textarea, select').forEach(function (el) {
+    // 测试台与账号区的输入不参与"设置脏状态"
+    if (el.id === 'pg-input' || el.id === 'acc-current' || el.id === 'acc-new') return;
+    if (el.closest && el.closest('#playground')) return;
     el.addEventListener('input', markDirty);
     el.addEventListener('change', markDirty);
   });
@@ -1010,6 +1194,202 @@ export function renderAdminHtml({ version = '', username = '' } = {}) {
       e.preventDefault();
       if (!$('btn-save').disabled) $('btn-save').click();
     }
+  });
+
+  // ---------------- 主题 ----------------
+  var THEME_KEY = 'tcg-theme';
+  var THEMES = ['auto', 'dark', 'light'];
+  var THEME_LABEL = { auto: '自动', dark: '暗色', light: '亮色' };
+  function applyTheme(mode) {
+    var m = THEMES.indexOf(mode) >= 0 ? mode : 'auto';
+    if (m === 'auto') document.documentElement.removeAttribute('data-theme');
+    else document.documentElement.setAttribute('data-theme', m);
+    $('btn-theme').textContent = '主题：' + THEME_LABEL[m];
+    try { localStorage.setItem(THEME_KEY, m); } catch (e) {}
+  }
+  var savedTheme = 'auto';
+  try { savedTheme = localStorage.getItem(THEME_KEY) || 'auto'; } catch (e) {}
+  applyTheme(savedTheme);
+  $('btn-theme').onclick = function () {
+    var idx = THEMES.indexOf(savedTheme);
+    savedTheme = THEMES[(idx + 1) % THEMES.length];
+    applyTheme(savedTheme);
+    toast('主题：' + THEME_LABEL[savedTheme], 'ok');
+  };
+
+  // ---------------- 片段（接入） ----------------
+  var tabs = Array.prototype.slice.call(document.querySelectorAll('#snip-tabs .tab'));
+  tabs.forEach(function (btn) {
+    btn.onclick = function () {
+      SNIP_ACTIVE = btn.getAttribute('data-snip');
+      tabs.forEach(function (b) { b.classList.toggle('active', b === btn); });
+      renderSnippet();
+    };
+  });
+  $('btn-snip-copy').onclick = function () {
+    var text = $('snip-box').textContent;
+    if (!text || text === '—') { toast('还没有可用片段（先加载配置）', 'warn'); return; }
+    navigator.clipboard.writeText(text).then(function () { toast('已复制', 'ok'); }).catch(function () {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); toast('已复制', 'ok'); } catch (e) { toast('复制失败，请手动选择', 'err'); }
+      ta.remove();
+    });
+  };
+
+  // ---------------- 概览（进程内指标） ----------------
+  var ovTimer = null;
+  function fmtPct(v) { return (v * 100).toFixed(1) + '%'; }
+  function fmtMs(v) { return (v || 0) + 'ms'; }
+  function timeOf(ts) {
+    var d = new Date(ts);
+    var p = function (n) { return (n < 10 ? '0' : '') + n; };
+    return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  }
+  function statusClass(s) { return s >= 500 ? 'err' : s >= 400 ? 'warn' : 'ok'; }
+  function renderOverview(data) {
+    var s = data.summary || {};
+    $('ov-uptime').textContent = s.uptime || '—';
+    $('ov-start').textContent = '启动于 ' + (s.startedAt ? timeOf(s.startedAt) : '—');
+    $('ov-requests').textContent = String(s.requests || 0);
+    $('ov-requests-sub').textContent = '成功 ' + (s.ok || 0) + ' · 4xx ' + (s.clientErrors || 0) + ' · 5xx ' + (s.serverErrors || 0);
+    $('ov-error').textContent = fmtPct(s.errorRate || 0);
+    $('ov-error-stat').className = 'stat ' + ((s.errorRate || 0) > 0.2 ? 'err' : (s.errorRate || 0) > 0 ? 'warn' : 'ok');
+    var types = Object.keys(s.errorsByType || {});
+    $('ov-error-sub').textContent = types.length ? types.map(function (k) { return k + '×' + s.errorsByType[k]; }).join(' · ') : '无错误';
+    $('ov-tool').textContent = s.simulated ? fmtPct(s.toolHitRate || 0) : '—';
+    $('ov-tool-sub').textContent = '模拟请求 ' + (s.simulated || 0) + ' 条';
+    $('ov-tool-stat').className = 'stat ' + (s.simulated && (s.toolHitRate || 0) < 0.5 ? 'warn' : '');
+    $('ov-p50').textContent = fmtMs(s.p50Ms);
+    $('ov-p95').textContent = fmtMs(s.p95Ms);
+    var media = (s.images || 0) + (s.files || 0) + (s.audios || 0);
+    $('ov-media').textContent = String(media);
+    $('ov-media-sub').textContent = '图 ' + (s.images || 0) + ' · 文件 ' + (s.files || 0) + ' · 音频 ' + (s.audios || 0);
+    $('ov-calls').textContent = String(s.toolCalls || 0);
+    $('ov-calls-sub').textContent = '出现工具调用的请求 ' + (s.toolHit || 0) + ' 条';
+
+    var rows = data.recent || [];
+    var body = $('ov-rows');
+    body.innerHTML = rows.map(function (r) {
+      var mediaCell = (r.images || r.files || r.audios) ? (r.images ? r.images + '图' : '') + (r.files ? ' ' + r.files + '文件' : '') + (r.audios ? ' ' + r.audios + '音频' : '') : '—';
+      return '<tr>' +
+        '<td>' + timeOf(r.ts) + '</td>' +
+        '<td title="' + r.path + '">' + r.path + '</td>' +
+        '<td class="' + statusClass(r.status) + '">' + r.status + '</td>' +
+        '<td>' + r.ms + 'ms</td>' +
+        '<td title="' + (r.model || '') + '">' + (r.model || '—') + '</td>' +
+        '<td>' + (r.simulated ? '模拟' : '透传') + (r.stream ? ' · 流式' : '') + '</td>' +
+        '<td>' + (r.toolCalls ? r.toolCalls + ' 次' : '—') + '</td>' +
+        '<td>' + mediaCell + '</td>' +
+        '<td class="' + (r.errorType ? 'err' : '') + '">' + (r.errorType || '—') + '</td>' +
+      '</tr>';
+    }).join('');
+    $('ov-empty').style.display = rows.length ? 'none' : '';
+    $('ov-table').style.display = rows.length ? '' : 'none';
+    $('ov-updated').textContent = '更新于 ' + timeOf(Date.now()) + ' · 最近 ' + rows.length + ' 条';
+  }
+  function loadOverview(silent) {
+    return api('/admin/api/metrics?limit=30').then(renderOverview).catch(function (e) {
+      if (!silent) toast('概览加载失败：' + e.message, 'err');
+    });
+  }
+  function setAutoRefresh(on) {
+    if (ovTimer) { clearInterval(ovTimer); ovTimer = null; }
+    if (on) ovTimer = setInterval(function () { loadOverview(true); }, 5000);
+  }
+  $('ov-auto').onchange = function () { setAutoRefresh($('ov-auto').checked); };
+  $('btn-ov-refresh').onclick = withBusy($('btn-ov-refresh'), function () { return loadOverview(false); });
+  $('btn-ov-reset').onclick = async function () {
+    if (!confirm('清零概览统计？（不影响配置）')) return;
+    await api('/admin/api/metrics/reset', { method: 'POST', body: {} });
+    await loadOverview(true);
+    toast('统计已清零', 'ok');
+  };
+
+  // ---------------- 测试台 ----------------
+  var PG_TOOL = {
+    model: '',
+    messages: [{ role: 'user', content: '北京天气怎么样？请调用工具查询。' }],
+    tools: [{
+      type: 'function',
+      function: {
+        name: 'get_weather',
+        description: '查询城市天气',
+        parameters: { type: 'object', properties: { city: { type: 'string' } }, required: ['city'] },
+      },
+    }],
+  };
+  var PG_IMAGE = {
+    model: '',
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'text', text: '这张图是什么颜色？只回答一个词。' },
+        { type: 'image_url', image_url: { url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYGAAAAAEAAH2FzhVAAAAAElFTkSuQmCC' } },
+      ],
+    }],
+    tools: [{
+      type: 'function',
+      function: { name: 'describe_image', parameters: { type: 'object', properties: { summary: { type: 'string' } } } },
+    }],
+  };
+  function fillPlayground(obj) {
+    var model = (loaded && loaded.settings && loaded.settings.defaultModel) || '';
+    var clone = JSON.parse(JSON.stringify(obj));
+    if (model) clone.model = model;
+    $('pg-input').value = JSON.stringify(clone, null, 2);
+    $('pg-mode').textContent = clone.tools && clone.tools.length ? '模拟模式（带 tools）' : '纯透传';
+  }
+  $('btn-pg-tool').onclick = function () { fillPlayground(PG_TOOL); };
+  $('btn-pg-image').onclick = function () { fillPlayground(PG_IMAGE); };
+  $('btn-pg-format').onclick = function () {
+    try {
+      var obj = JSON.parse($('pg-input').value);
+      $('pg-input').value = JSON.stringify(obj, null, 2);
+      $('pg-mode').textContent = obj.tools && obj.tools.length ? '模拟模式（带 tools）' : '纯透传';
+      toast('JSON 合法，已格式化', 'ok');
+    } catch (e) {
+      toast('JSON 解析失败：' + e.message, 'err');
+    }
+  };
+  $('btn-pg-clear').onclick = function () {
+    $('pg-output').style.display = 'none';
+    $('pg-output').textContent = '';
+    $('pg-status').textContent = '未发送';
+  };
+  $('btn-pg-send').onclick = withBusy($('btn-pg-send'), async function () {
+    var raw = $('pg-input').value.trim();
+    if (!raw) { toast('先在输入框里写一个请求体', 'warn'); return; }
+    var request;
+    try {
+      request = JSON.parse(raw);
+    } catch (e) {
+      $('pg-status').textContent = 'JSON 解析失败：' + e.message;
+      toast('JSON 解析失败', 'err');
+      return;
+    }
+    $('pg-status').textContent = '请求中…';
+    var data = await api('/admin/api/playground', { method: 'POST', body: { request: request } });
+    $('pg-output').style.display = '';
+    $('pg-output').textContent = JSON.stringify(data.response || data.error || data, null, 2);
+    var parts = [];
+    parts.push(data.ok ? 'HTTP ' + data.status : '上游 ' + data.status + '（失败）');
+    parts.push(data.latencyMs + 'ms');
+    parts.push(data.simulated ? '模拟模式' : '纯透传');
+    if (data.media && (data.media.images || data.media.files || data.media.audios)) {
+      parts.push('媒体 图' + (data.media.images || 0) + '/文件' + (data.media.files || 0) + '/音频' + (data.media.audios || 0));
+    }
+    if (data.response && data.response.choices && data.response.choices[0]) {
+      parts.push('finish=' + (data.response.choices[0].finish_reason || '-'));
+      var tcs = data.response.choices[0].message && data.response.choices[0].message.tool_calls;
+      if (tcs && tcs.length) parts.push('tool_calls=' + tcs.length);
+    }
+    if (data.error && data.error.type) parts.push('error=' + data.error.type);
+    $('pg-status').textContent = parts.join(' · ');
+    toast(data.ok ? '请求成功' : '上游返回失败：' + (data.error && data.error.type ? data.error.type : data.status), data.ok ? 'ok' : 'err');
+    loadOverview(true);
   });
 
   var sections = Array.prototype.slice.call(document.querySelectorAll('main section[id]'));
@@ -1025,7 +1405,13 @@ export function renderAdminHtml({ version = '', username = '' } = {}) {
   }
 
   api('/admin/api/settings')
-    .then(applyView)
+    .then(function (data) {
+      applyView(data);
+      fillPlayground(PG_TOOL);
+      $('pg-mode').textContent = '模拟模式（带 tools）';
+      loadOverview(true);
+      setAutoRefresh($('ov-auto').checked);
+    })
     .catch(function (e) {
       $('dirty').textContent = '加载失败：' + e.message;
       $('dirty').className = 'state err';

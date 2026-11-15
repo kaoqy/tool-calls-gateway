@@ -49,7 +49,7 @@ jobs:
       - name: 单元测试
         run: npm test
 
-      - name: 全量离线 gate（M0~M6 + M8 + M10~M12 + M14）
+      - name: 全量离线 gate（M0~M6 + M8 + M10~M12 + M14 + M15）
         run: npm run gate
 
       - name: 密钥泄漏扫描（只匹配真实 key 形态，避免误报测试用假值）

@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env sh
+#!/usr/bin/env sh
 # 一键部署：拉取已发布镜像 → 起容器 → 等 /healthz 就绪 → 打印下一步。
 #
 #   curl -fsSL https://raw.githubusercontent.com/kaoqy/tool-calls-gateway/main/deploy.sh | sh
@@ -8,12 +8,12 @@
 # 唯一会持久化的是数据卷 tcg-data（user.role=node 可写 /app/data），容器重建不丢配置。
 #
 # 可选覆盖：
-#   TCG_IMAGE    镜像地址（默认 ghcr.io/kaoqy/tool-calls-gateway:v1.4.0）
+#   TCG_IMAGE    镜像地址（默认 ghcr.io/kaoqy/tool-calls-gateway:v1.5.0）
 #   HOST_PORT    宿主端口（默认 8787）
 #   INSTALL_DIR  安装目录（默认 ./toolcall-gateway）
 set -eu
 
-IMAGE="${TCG_IMAGE:-ghcr.io/kaoqy/tool-calls-gateway:v1.4.0}"
+IMAGE="${TCG_IMAGE:-ghcr.io/kaoqy/tool-calls-gateway:v1.5.0}"
 PORT="${HOST_PORT:-8787}"
 DIR="${INSTALL_DIR:-./toolcall-gateway}"
 

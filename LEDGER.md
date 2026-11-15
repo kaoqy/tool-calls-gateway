@@ -328,6 +328,24 @@
 断言：HTTP 200、`finish_reason=tool_calls`、`/healthz` 的 `imageMode=pass`、以及上游 `__diag.lastRequest.contentShapes` 里用户消息 `kind=array`、part 顺序 `text,image_url`、image_url 的 `sha256` 与发送值完全一致（即 base64 未被改写）。
 
 镜像：`ghcr.io/kaoqy/tool-calls-gateway:v1.4.0`（含 `1.4.0` / `1.4` / `latest` / `sha-6db1c25`），多架构 `linux/amd64` + `linux/arm64`，digest `sha256:7212136f…`。
+### M15（控制台：概览 / 测试台 / 接入片段，2026-11-15）
+
+**目标**：让"部署完之后到底跑得怎么样"在网页里一眼可见，不必去看日志或敲 curl。
+
+**实现**
+- 新增 `src/metrics.mjs`：进程内环形缓冲（默认 100 条）+ 累计计数器。记录字段是白名单（状态码/耗时/模型/是否模拟/工具数/媒体计数/错误类型），**不记录提示词、图片内容、密钥**；重启清零，不落盘。
+- `server.mjs`：每个 `/v1/*` 请求在 `res.finish` 时记一条（只统计下游流量）；各分支补 `errorType`（`invalid_json` / `invalid_request_error` / `invalid_api_key` / `upstream_not_configured` / `media_too_many` / `upstream_vision_unsupported` …）；新增 `GET /admin/api/metrics`、`POST /admin/api/metrics/reset`、`POST /admin/api/playground`（走与 /v1 完全相同的链路，支持模拟与透传两种）。
+- `/healthz` 增加 `version` 与 `uptimeMs`，README 的"更新后自检"直接看版本号。
+- `admin-ui.mjs`：新增「概览」（8 个卡片 + 最近 30 条请求表 + 5s 自动刷新/刷新/清零）、「测试台」（编辑 JSON → 发送 → 显示标准响应 + 状态行，附工具/图片示例与格式化）、「接入」四个标签页（curl / Python / Node / Codex，按当前实例地址与默认模型生成）、顶栏主题切换（自动/暗/亮，localStorage）。
+
+**Gate 结果（真跑）**
+| 项 | 结果 |
+| --- | --- |
+| `node --test test/metrics.test.mjs` | **11/11**：时长格式化 / 累计与错误率 / 工具命中率（只按模拟请求）/ 媒体累加 / P50-P95 / 环形缓冲与新在前 / reset / 白名单防泄漏 / 非法字段归一化 / 注入时钟 / mediaCountsOf |
+| `node scripts/e2e_console.mjs` | **21/21**：初始化 → 鉴权（无会话 401）→ 三类流量 → 概览聚合正确（requests/simulated/toolHit/images/P50/P95/uptime）→ 指标里不含提示词与密钥 → 测试台模拟模式拿到标准 tool_calls → 测试台透传模式返回上游原始结构 → 非法请求体 400 → 清零 → 设置页含概览与测试台 |
+| `npm test` | **136/136** |
+| `npm run gate` | **PASS (13/14 通过, 1 跳过)**，新增 **M15 PASS**；M9 需 --live |
+| 浏览器实测 | 登录后概览显示 7 条请求 / 错误率 14.3%（invalid_json×1）/ 工具命中率 100% / P50 4ms / P95 33ms / 媒体 1 图；测试台点「发送」返回 `HTTP 200 · 8ms · 模拟模式 · finish=tool_calls · tool_calls=1` |
 ## 5. 未验证项汇总
 
 | 项 | 状态 | 原因 | 复现命令 |
@@ -681,6 +699,7 @@ docker run -d --name toolcall-gateway -p 8787:8787 \
 | `v1.1.1` | `9487663` | `43678695307` ✅ | `sha256:d1a377d6…` | 修复上述问题：`ADMIN_TOKEN` 登录 + HttpOnly Cookie；CI 冒烟覆盖 401/200 与 `deploy.sh` 语法 |
 | `v1.2.0` | `19d4339` | `43683536879` ✅ | `sha256:4eaa009e…` | 设置页 UI 重构（侧边栏/脏状态/模型表/接入信息）+ `test/ui.test.mjs` 回归防线；README 部署章节重写 |
 | `v1.3.0` | `2adc8bc` | `43687684159` ✅ | `sha256:5e57930d…` |
-| `v1.4.0` | `6db1c25` | `43696105970` ✅ | `sha256:7212136f…` | **多模态修复**：模拟模式不再丢弃图片；新增 `src/content.mjs`（归一化/计数/fail-open）、`imageMode` 三态、16MB 上限 + 边读边计、媒体超时放宽、`upstream_vision_unsupported` 归一化、视觉自检 | **零配置部署**：去掉全部必需 env，首次访问 /admin 创建管理员 + 配上游；新增 `src/auth.mjs`（scrypt/会话/节流）+ 初始化向导 + 账号分区；未配上游时 /v1 明确 503 |
+| `v1.4.0` | `6db1c25` | `43696105970` ✅ | `sha256:7212136f…` |
+| `v1.5.0` | 待填 | 待填 | 待填 | **控制台可视化**：/admin 新增概览（请求/错误率/工具命中率/P50-P95/媒体计数 + 最近请求表）、请求测试台、四种接入片段、主题切换；新增 `src/metrics.mjs`（内存环形缓冲，只存请求形状）；`/healthz` 增加 `version` 与 `uptimeMs`；README 收敛为「介绍 + 已部署一键更新」，完整文档移到 `docs/FULL.md` | **多模态修复**：模拟模式不再丢弃图片；新增 `src/content.mjs`（归一化/计数/fail-open）、`imageMode` 三态、16MB 上限 + 边读边计、媒体超时放宽、`upstream_vision_unsupported` 归一化、视觉自检 | **零配置部署**：去掉全部必需 env，首次访问 /admin 创建管理员 + 配上游；新增 `src/auth.mjs`（scrypt/会话/节流）+ 初始化向导 + 账号分区；未配上游时 /v1 明确 503 |
 
 镜像：`ghcr.io/kaoqy/tool-calls-gateway:{v1.1.1,1.1.1,1.1,latest,sha-*}`，平台 `linux/amd64` + `linux/arm64`。
