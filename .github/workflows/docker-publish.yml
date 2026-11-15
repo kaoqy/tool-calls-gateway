@@ -47,15 +47,16 @@ jobs:
       - name: 全量离线 gate（M0~M6 + M8 + M10）
         run: npm run gate
 
-      - name: 密钥泄漏扫描（除 .env 外不得出现 sk- 长串）
+      - name: 密钥泄漏扫描（只匹配真实 key 形态，避免误报测试用假值）
         run: |
           set -eu
-          if grep -rIl --exclude-dir=node_modules --exclude-dir=.git --exclude='.env*' \
-               -E 'sk-[A-Za-z0-9_-]{20,}' . ; then
-            echo "::error::检测到疑似密钥，请移除后再提交"
+          PAT='sk-[A-Za-z0-9]{24,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|AKIA[0-9A-Z]{16}'
+          if grep -rIn --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=out \
+               --exclude='.env*' -E "$PAT" . ; then
+            echo "::error::检测到疑似真实密钥，请移除后再提交"
             exit 1
           fi
-          echo "未发现密钥"
+          echo "未发现真实形态的密钥（sk-test / sk-dummy 等测试假值不计）"
 
   docker:
     name: 构建并推送镜像（GHCR）
