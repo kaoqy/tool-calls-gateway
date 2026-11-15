@@ -1,0 +1,154 @@
+name: ci-and-publish
+
+# 测试 → 构建多架构镜像 → 推送到 GitHub Container Registry (GHCR)
+# 打 tag（如 v1.0.0）时产出 ghcr.io/<owner>/<repo>:v1.0.0
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: 测试（Node ${{ matrix.node }}）
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: 零运行时依赖校验
+        run: |
+          node -e "
+            const p = require('./package.json');
+            const deps = { ...(p.dependencies || {}), ...(p.devDependencies || {}) };
+            if (Object.keys(deps).length) {
+              console.error('检测到第三方依赖（违反零依赖约束）:', deps);
+              process.exit(1);
+            }
+            console.log('零依赖 OK');
+          "
+
+      - name: 单元测试
+        run: npm test
+
+      - name: 全量离线 gate（M0~M6 + M8 + M10）
+        run: npm run gate
+
+      - name: 密钥泄漏扫描（除 .env 外不得出现 sk- 长串）
+        run: |
+          set -eu
+          if grep -rIl --exclude-dir=node_modules --exclude-dir=.git --exclude='.env*' \
+               -E 'sk-[A-Za-z0-9_-]{20,}' . ; then
+            echo "::error::检测到疑似密钥，请移除后再提交"
+            exit 1
+          fi
+          echo "未发现密钥"
+
+  docker:
+    name: 构建并推送镜像（GHCR）
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: 计算小写镜像名
+        id: img
+        run: echo "name=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 生成镜像标签
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ steps.img.outputs.name }}
+          labels: |
+            org.opencontainers.image.title=toolcall-gateway
+            org.opencontainers.image.description=OpenAI-compatible gateway that simulates tool calling on a plain-chat upstream
+          tags: |
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=sha-,format=short
+
+      - name: Build & Push（linux/amd64 + linux/arm64）
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+          sbom: true
+
+      - name: 写入 Job Summary
+        run: |
+          {
+            echo "### 镜像已推送"
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  smoke:
+    name: 镜像冒烟（build + /healthz）
+    needs: docker
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 本地构建 amd64 镜像
+        run: docker build -t toolcall-gateway:smoke .
+
+      - name: 起容器并验证 /healthz 与非 root 用户
+        run: |
+          set -eu
+          docker run -d --name tc-smoke -p 8787:8787 \
+            -e UPSTREAM_BASE_URL=https://example.com \
+            -e UPSTREAM_API_KEY=sk-smoke-test-only \
+            toolcall-gateway:smoke
+          ok=""
+          for i in $(seq 1 30); do
+            if body=$(curl -fsS http://127.0.0.1:8787/healthz 2>/dev/null); then ok="$body"; break; fi
+            sleep 1
+          done
+          echo "healthz=$ok"
+          test "$ok" = '{"status":"ok"}'
+          user=$(docker inspect --format '{{.Config.User}}' toolcall-gateway:smoke)
+          echo "container user=$user"
+          test "$user" = "node"
+          docker logs tc-smoke | tail -n 20
+          docker rm -f tc-smoke
+
+      - name: 失败时输出容器日志
+        if: failure()
+        run: docker logs tc-smoke || true

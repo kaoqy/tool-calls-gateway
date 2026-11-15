@@ -1,0 +1,28 @@
+{
+  "name": "toolcall-gateway",
+  "version": "1.0.0",
+  "private": true,
+  "description": "OpenAI-compatible gateway that simulates tool calling on top of a plain-chat upstream",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "test": "node --test test/*.test.mjs",
+    "gate": "node scripts/gate.mjs",
+    "gate:live": "node scripts/gate.mjs --live",
+    "mock": "node mock/upstream.mjs",
+    "conformance": "node scripts/conformance.mjs",
+    "conformance:live": "node scripts/conformance.mjs --live",
+    "hitrate": "node scripts/hitrate.mjs",
+    "e2e:passthrough": "node scripts/e2e_passthrough.mjs",
+    "e2e:stream": "node scripts/e2e_stream_tool.mjs",
+    "e2e:mock": "node scripts/e2e_mock.mjs",
+    "e2e:codex": "node scripts/e2e_codex.mjs",
+    "e2e:codex:live": "node scripts/e2e_codex.mjs --live",
+    "e2e:live": "node scripts/e2e_live.mjs --live"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}

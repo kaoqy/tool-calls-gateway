@@ -1,0 +1,33 @@
+# 生产用 compose：直接拉取已发布的镜像，无需源码构建（一键部署用）
+#   docker compose -f docker-compose.prod.yml up -d
+services:
+  toolcall-gateway:
+    image: ${TCG_IMAGE:-ghcr.io/kaoqy/tool-calls-gateway:v1.0.0}
+    container_name: toolcall-gateway
+    ports:
+      - "${HOST_PORT:-8787}:8787"
+    env_file:
+      - .env
+    environment:
+      PORT: "8787"
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:'+(process.env.PORT||8787)+'/healthz',{signal:AbortSignal.timeout(4000)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      start_period: 5s
+      retries: 3
