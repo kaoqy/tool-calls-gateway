@@ -323,7 +323,11 @@
 - 修复：容器改用 `--network host`（容器里的 127.0.0.1 就是宿主机），mock 仍绑回环；顺带在该步骤开头清掉上一步遗留的 `tc-smoke` 容器，避免 8787 端口冲突。
 - 线上镜像本身已成功构建，但 smoke 结论为 failure，因此把 v1.4.0 重打到修复后的提交，重跑 CI 直到全绿（见下表）。
 
-**未本机验证**：Docker 侧的多模态端到端（本机无 docker）。改为在 CI 冒烟里真跑：主机起 mock 上游 → 容器用 `--add-host=host.docker.internal:host-gateway` 指向它 → 零 env 初始化 → curl 发带图 + tools 的请求 → 断言 200 / `finish_reason=tool_calls` / 上游 `__diag` 里 content 是数组且 image_url 的 sha256 与发送值一致。
+**Docker 侧验证（CI 真容器，run `43695680572`）**：本机没有 docker，所以把这条端到端放在 CI 里跑，步骤名「多模态端到端（容器 + mock 上游：图片必须真的到达上游）」全绿——
+主机起 mock 上游（`127.0.0.1:18990`）→ 容器以 `--network host` 启动（容器内 127.0.0.1 即宿主机）→ 纯 HTTP 完成初始化（上游指向 mock）→ `curl` 发一条带 `tools` + 1×1 PNG（data URL）的请求 →
+断言：HTTP 200、`finish_reason=tool_calls`、`/healthz` 的 `imageMode=pass`、以及上游 `__diag.lastRequest.contentShapes` 里用户消息 `kind=array`、part 顺序 `text,image_url`、image_url 的 `sha256` 与发送值完全一致（即 base64 未被改写）。
+
+镜像：`ghcr.io/kaoqy/tool-calls-gateway:v1.4.0`（含 `1.4.0` / `1.4` / `latest` / `sha-b99aea1`），多架构 `linux/amd64` + `linux/arm64`，digest `sha256:fbb6e607…`。
 ## 5. 未验证项汇总
 
 | 项 | 状态 | 原因 | 复现命令 |
@@ -677,6 +681,6 @@ docker run -d --name toolcall-gateway -p 8787:8787 \
 | `v1.1.1` | `9487663` | `43678695307` ✅ | `sha256:d1a377d6…` | 修复上述问题：`ADMIN_TOKEN` 登录 + HttpOnly Cookie；CI 冒烟覆盖 401/200 与 `deploy.sh` 语法 |
 | `v1.2.0` | `19d4339` | `43683536879` ✅ | `sha256:4eaa009e…` | 设置页 UI 重构（侧边栏/脏状态/模型表/接入信息）+ `test/ui.test.mjs` 回归防线；README 部署章节重写 |
 | `v1.3.0` | `2adc8bc` | `43687684159` ✅ | `sha256:5e57930d…` |
-| `v1.4.0` | 待填 | 待填 | 待填 | **多模态修复**：模拟模式不再丢弃图片；新增 `src/content.mjs`（归一化/计数/fail-open）、`imageMode` 三态、16MB 上限 + 边读边计、媒体超时放宽、`upstream_vision_unsupported` 归一化、视觉自检 | **零配置部署**：去掉全部必需 env，首次访问 /admin 创建管理员 + 配上游；新增 `src/auth.mjs`（scrypt/会话/节流）+ 初始化向导 + 账号分区；未配上游时 /v1 明确 503 |
+| `v1.4.0` | `b99aea1` | `43695680572` ✅ | `sha256:fbb6e607…` | **多模态修复**：模拟模式不再丢弃图片；新增 `src/content.mjs`（归一化/计数/fail-open）、`imageMode` 三态、16MB 上限 + 边读边计、媒体超时放宽、`upstream_vision_unsupported` 归一化、视觉自检 | **零配置部署**：去掉全部必需 env，首次访问 /admin 创建管理员 + 配上游；新增 `src/auth.mjs`（scrypt/会话/节流）+ 初始化向导 + 账号分区；未配上游时 /v1 明确 503 |
 
 镜像：`ghcr.io/kaoqy/tool-calls-gateway:{v1.1.1,1.1.1,1.1,latest,sha-*}`，平台 `linux/amd64` + `linux/arm64`。
