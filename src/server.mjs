@@ -10,7 +10,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { config as defaultConfig, resolveModel } from './config.mjs';
 import { logger as defaultLogger } from './logger.mjs';
 import { createSettingsStore, normalizePatch } from './settings.mjs';
-import { renderAdminHtml } from './admin-ui.mjs';
+import { renderAdminHtml, renderLoginHtml } from './admin-ui.mjs';
 import {
   callUpstreamGet,
   callUpstreamJson,
@@ -123,14 +123,45 @@ function rejectUnauthorized(req, res, config) {
   return true;
 }
 
-/** 设置页鉴权：设了 ADMIN_TOKEN 就用 Bearer；否则只允许本机回环访问。 */
+function readCookie(req, name) {
+  const raw = String(req.headers.cookie ?? '');
+  for (const part of raw.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx === -1) continue;
+    const key = part.slice(0, idx).trim();
+    if (key === name) {
+      const value = part.slice(idx + 1).trim();
+      try {
+        return decodeURIComponent(value);
+      } catch {
+        return value;
+      }
+    }
+  }
+  return '';
+}
+
+/** 设置页鉴权：ADMIN_TOKEN（Bearer 或登录 Cookie）> 本机回环。 */
 function adminAuthorized(req, config) {
   if (config.adminToken) {
-    const token = String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, '').trim();
-    return token === config.adminToken;
+    const bearer = String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, '').trim();
+    if (bearer && bearer === config.adminToken) return true;
+    return readCookie(req, 'tcg_admin') === config.adminToken;
   }
   const ip = req.socket.remoteAddress ?? '';
   return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+}
+
+async function handleAdminLogin(req, res, config) {
+  const parsed = await readJsonBody(req, 8 * 1024);
+  if (parsed.error) return sendError(res, parsed.error.status, parsed.error.type, parsed.error.message);
+  if (!config.adminToken) return sendJson(res, 200, { ok: true, mode: 'loopback' });
+  const token = String(parsed.json?.token ?? '').trim();
+  if (!token || token !== config.adminToken) {
+    return sendError(res, 401, 'admin_unauthorized', '令牌不正确');
+  }
+  res.setHeader('set-cookie', `tcg_admin=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400`);
+  return sendJson(res, 200, { ok: true, mode: 'token' });
 }
 
 function rejectAdmin(req, res, config) {
@@ -156,17 +187,25 @@ async function handleRequest(req, res, ctx) {
     return sendJson(res, 200, { status: 'ok' });
   }
 
+  if (req.method === 'POST' && url.pathname === '/admin/api/login') {
+    return handleAdminLogin(req, res, config);
+  }
+
   if (req.method === 'GET' && (url.pathname === '/admin' || url.pathname === '/admin/')) {
-    if (rejectAdmin(req, res, config)) return;
-    const html = renderAdminHtml({ version: packageVersion() });
-    res.writeHead(200, {
+    const headers = {
       'content-type': 'text/html; charset=utf-8',
       'cache-control': 'no-store',
       'x-frame-options': 'DENY',
       'referrer-policy': 'no-referrer',
       'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'",
-    });
-    res.end(html);
+    };
+    if (!adminAuthorized(req, config)) {
+      res.writeHead(401, headers);
+      res.end(renderLoginHtml({ version: packageVersion() }));
+      return;
+    }
+    res.writeHead(200, headers);
+    res.end(renderAdminHtml({ version: packageVersion() }));
     return;
   }
 
@@ -240,6 +279,11 @@ function withCandidate(config, patch) {
 async function handleAdminApi(req, res, url, { config, settings, logger }) {
   if (!settings) return sendError(res, 503, 'settings_unavailable', '本实例没有启用设置存储');
   const pathname = url.pathname.replace(/\/+$/, '');
+
+  if (pathname === '/admin/api/logout' && req.method === 'POST') {
+    res.setHeader('set-cookie', 'tcg_admin=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0');
+    return sendJson(res, 200, { ok: true });
+  }
 
   if (pathname === '/admin/api/settings' && req.method === 'GET') {
     return sendJson(res, 200, settings.publicView());

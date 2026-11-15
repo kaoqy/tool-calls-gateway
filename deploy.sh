@@ -5,12 +5,12 @@
 #   # 或本地：sh deploy.sh
 #
 # 可用环境变量覆盖：
-#   TCG_IMAGE    镜像地址（默认 ghcr.io/kaoqy/tool-calls-gateway:v1.1.0）
+#   TCG_IMAGE    镜像地址（默认 ghcr.io/kaoqy/tool-calls-gateway:v1.1.1）
 #   HOST_PORT    宿主端口（默认 8787）
 #   INSTALL_DIR  安装目录（默认 ./toolcall-gateway）
 set -eu
 
-IMAGE="${TCG_IMAGE:-ghcr.io/kaoqy/tool-calls-gateway:v1.1.0}"
+IMAGE="${TCG_IMAGE:-ghcr.io/kaoqy/tool-calls-gateway:v1.1.1}"
 PORT="${HOST_PORT:-8787}"
 DIR="${INSTALL_DIR:-./toolcall-gateway}"
 
@@ -38,6 +38,7 @@ if [ ! -f .env ]; then
     "UPSTREAM_API_KEY=" \
     "DEFAULT_MODEL=deepseek-chat" \
     "GATEWAY_API_KEY=" \
+    "ADMIN_TOKEN=" \
     "TOOL_MODE=auto" \
     "REASONING_PASSTHROUGH=on" \
     "REQUEST_TIMEOUT_MS=60000" \
@@ -56,6 +57,21 @@ if ! grep -Eq '^UPSTREAM_BASE_URL=https?://' .env; then
 fi
 if ! grep -Eq '^UPSTREAM_API_KEY=.+' .env || grep -Eq '^UPSTREAM_API_KEY=sk-REPLACE_ME' .env; then
   echo "!! .env 里的 UPSTREAM_API_KEY 未填写"; exit 1
+fi
+
+# 2.5) 设置页令牌：docker 端口映射下来源 IP 不是回环，必须有 ADMIN_TOKEN 才能打开 /admin
+if ! grep -Eq '^ADMIN_TOKEN=.+' .env; then
+  if [ -r /dev/urandom ]; then
+    TCG_ADMIN_TOKEN=$(od -An -tx1 -N16 /dev/urandom | tr -d ' \n')
+  else
+    TCG_ADMIN_TOKEN="tcg-$(date +%s)"
+  fi
+  awk -v tok="$TCG_ADMIN_TOKEN" '
+    /^ADMIN_TOKEN=/ { print "ADMIN_TOKEN=" tok; next }
+    { print }
+  ' .env > .env.tmp && mv .env.tmp .env
+  echo "==> 已生成设置页令牌：ADMIN_TOKEN=$TCG_ADMIN_TOKEN"
+  echo "    浏览器打开 http://127.0.0.1:$PORT/admin 输入该令牌（Cookie 24h 有效）"
 fi
 
 # 3) 写一份使用预构建镜像的 compose 文件
@@ -108,6 +124,7 @@ while [ "$i" -lt 30 ]; do
     echo "==> 就绪：$body"
     echo
     echo "OpenAI 兼容端点： http://127.0.0.1:$PORT/v1"
+    echo "设置页：         http://127.0.0.1:$PORT/admin"
     echo "健康检查：       http://127.0.0.1:$PORT/healthz"
     echo "查看日志：       $COMPOSE logs -f"
     echo "停止：           $COMPOSE down"

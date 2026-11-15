@@ -1,6 +1,58 @@
 // 设置页（单文件 HTML，无构建、无外部 CDN、无第三方依赖）。
 // 只做数据展示与表单提交，所有校验/持久化都在 /admin/api/* 里完成。
 
+export function renderLoginHtml({ version = '' } = {}) {
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>toolcall-gateway · 登录</title>
+<style>
+  :root { color-scheme: light dark; --bg:#0f1115; --card:#171a21; --line:#2a2f3a; --text:#e7ecf3; --muted:#8b94a7; --accent:#4c8dff; --err:#f85149; }
+  @media (prefers-color-scheme: light) { :root { --bg:#f6f7f9; --card:#fff; --line:#e3e6ea; --text:#1b1f24; --muted:#5b6472; } }
+  body { margin:0; min-height:100vh; display:grid; place-items:center; background:var(--bg); color:var(--text); font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Noto Sans SC",sans-serif; }
+  form { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:26px; width:min(380px,90vw); display:grid; gap:12px; }
+  h1 { font-size:16px; margin:0; }
+  p { margin:0; color:var(--muted); font-size:12px; }
+  input { width:100%; box-sizing:border-box; background:transparent; color:var(--text); border:1px solid var(--line); border-radius:8px; padding:10px 12px; font:inherit; }
+  button { background:var(--accent); border:0; color:#fff; font-weight:600; padding:10px 12px; border-radius:8px; cursor:pointer; font:inherit; }
+  .err { color:var(--err); font-size:12px; min-height:1.2em; }
+</style>
+</head>
+<body>
+<form id="f">
+  <h1>toolcall-gateway 设置</h1>
+  <p>这个实例设置了 <code>ADMIN_TOKEN</code>，请输入令牌。登录后 24 小时内有效（Cookie）。</p>
+  <input id="token" type="password" placeholder="ADMIN_TOKEN" autocomplete="current-password" autofocus>
+  <div class="err" id="err"></div>
+  <button type="submit">登录</button>
+  <p style="text-align:right;opacity:.7">v${version}</p>
+</form>
+<script>
+document.getElementById('f').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const err = document.getElementById('err');
+  err.textContent = '';
+  try {
+    const res = await fetch('/admin/api/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token: document.getElementById('token').value }),
+    });
+    if (!res.ok) {
+      const j = await res.json().catch(() => null);
+      err.textContent = j?.error?.message || ('登录失败：HTTP ' + res.status);
+      return;
+    }
+    location.reload();
+  } catch (ex) { err.textContent = '网络错误：' + ex.message; }
+});
+</script>
+</body>
+</html>`;
+}
+
 export function renderAdminHtml({ version = '' } = {}) {
   return `<!doctype html>
 <html lang="zh-CN">
@@ -49,6 +101,7 @@ export function renderAdminHtml({ version = '' } = {}) {
   <h1>toolcall-gateway 设置</h1>
   <span class="meta" id="ver">v${version}</span>
   <span class="meta" id="file"></span>
+  <span class="meta" style="margin-left:auto"><a href="#" id="btn-logout" style="color:inherit">退出登录</a></span>
 </header>
 <main>
   <section>
@@ -244,6 +297,12 @@ $('btn-tool').onclick = async () => {
         data.finishReason === 'tool_calls' ? 'ok' : 'warn');
   } catch (e) { log('自检失败：' + e.message, 'err'); }
   finally { $('btn-tool').disabled = false; }
+};
+
+$('btn-logout').onclick = async (e) => {
+  e.preventDefault();
+  try { await api('/admin/api/logout', { method: 'POST', body: '{}' }); } catch {}
+  location.reload();
 };
 
 load();

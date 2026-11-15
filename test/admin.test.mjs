@@ -174,11 +174,16 @@ test('8. 设置文件确实落盘，且只含覆盖项', async () => {
   assert.deepEqual(doc.settings, { defaultModel: 'mock-multi' });
 });
 
-test('9. ADMIN_TOKEN：远程/未带 token → 401；带对 token → 200', async () => {
+test('9. ADMIN_TOKEN：远程/未带 token → 401（页面给登录表单）；带对 token → 200', async () => {
   const a = await startGateway({ ADMIN_TOKEN: 'adm-secret' });
   const noToken = await requestJson(`${a.baseUrl}/admin/api/settings`);
   assert.equal(noToken.status, 401, noToken.text);
   assert.equal(noToken.json.error.type, 'admin_unauthorized');
+
+  const pageNoAuth = await requestJson(`${a.baseUrl}/admin`);
+  assert.equal(pageNoAuth.status, 401);
+  assert.match(pageNoAuth.headers.get('content-type') ?? '', /text\/html/);
+  assert.ok(pageNoAuth.text.includes('id="token"'), '未登录时应返回登录页');
 
   const wrong = await requestJson(`${a.baseUrl}/admin/api/settings`, { headers: { authorization: 'Bearer nope' } });
   assert.equal(wrong.status, 401);
@@ -189,4 +194,31 @@ test('9. ADMIN_TOKEN：远程/未带 token → 401；带对 token → 200', asyn
   const page = await requestJson(`${a.baseUrl}/admin`, { headers: { authorization: 'Bearer adm-secret' } });
   assert.equal(page.status, 200);
   assert.ok(page.text.includes('toolcall-gateway 设置'));
+});
+
+test('10. 登录：错令牌 401；对令牌下发 HttpOnly Cookie，之后免 Bearer 访问', async () => {
+  const a = await startGateway({ ADMIN_TOKEN: 'adm-secret' });
+
+  const bad = await requestJson(`${a.baseUrl}/admin/api/login`, { method: 'POST', body: { token: 'wire-rong' } });
+  assert.equal(bad.status, 401);
+  assert.equal(bad.json.error.type, 'admin_unauthorized');
+
+  const okRes = await fetch(`${a.baseUrl}/admin/api/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ token: 'adm-secret' }),
+  });
+  assert.equal(okRes.status, 200);
+  const setCookie = okRes.headers.get('set-cookie') ?? '';
+  assert.match(setCookie, /tcg_admin=/);
+  assert.match(setCookie, /HttpOnly/i);
+
+  const cookie = setCookie.split(';')[0];
+  const withCookie = await requestJson(`${a.baseUrl}/admin/api/settings`, { headers: { cookie } });
+  assert.equal(withCookie.status, 200, withCookie.text);
+  assert.equal(withCookie.text.includes('adm-secret'), false, 'Cookie 值不应出现在响应里');
+
+  const loggedOut = await requestJson(`${a.baseUrl}/admin/api/logout`, { method: 'POST', headers: { cookie } });
+  assert.equal(loggedOut.status, 200);
+  assert.match(loggedOut.headers.get('set-cookie') ?? '', /Max-Age=0/);
 });

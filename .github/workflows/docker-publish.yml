@@ -41,6 +41,11 @@ jobs:
             console.log('零依赖 OK');
           "
 
+      - name: 部署脚本语法检查
+        run: |
+          sh -n deploy.sh
+          bash -n deploy.sh
+
       - name: 单元测试
         run: npm test
 
@@ -130,12 +135,13 @@ jobs:
       - name: 本地构建 amd64 镜像
         run: docker build -t toolcall-gateway:smoke .
 
-      - name: 起容器并验证 /healthz 与非 root 用户
+      - name: 起容器并验证 /healthz、非 root 用户与设置页
         run: |
           set -eu
           docker run -d --name tc-smoke -p 8787:8787 \
             -e UPSTREAM_BASE_URL=https://example.com \
             -e UPSTREAM_API_KEY=sk-smoke-test-only \
+            -e ADMIN_TOKEN=smoke-admin-token \
             toolcall-gateway:smoke
           ok=""
           for i in $(seq 1 30); do
@@ -148,9 +154,12 @@ jobs:
           echo "container user=$user"
           test "$user" = "node"
 
-          # 设置页与设置 API 也必须可用（容器内默认只读挂载 /app/data）
-          curl -fsS http://127.0.0.1:8787/admin | grep -q 'id="upstreamBaseUrl"'
-          curl -fsS http://127.0.0.1:8787/admin/api/settings | grep -q '"sources"'
+          # 设置了 ADMIN_TOKEN：未带令牌必须 401，带令牌能拿到设置页与设置 API
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8787/admin)
+          echo "admin without token -> $code"
+          test "$code" = "401"
+          curl -fsS -H 'Authorization: Bearer smoke-admin-token' http://127.0.0.1:8787/admin | grep -q 'id="upstreamBaseUrl"'
+          curl -fsS -H 'Authorization: Bearer smoke-admin-token' http://127.0.0.1:8787/admin/api/settings | grep -q '"sources"'
 
           docker logs tc-smoke | tail -n 20
           docker rm -f tc-smoke
