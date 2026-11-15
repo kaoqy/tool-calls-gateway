@@ -354,7 +354,7 @@ test('20. 单次请求图片过多（>8）→ 413', async () => {
   });
   assert.equal(res.status, 413, res.text);
   assert.equal(res.json.error.type, 'payload_too_large');
-  assert.match(res.json.error.message, /图片过多/);
+  assert.match(res.json.error.message, /单次请求图片过多或过大/);
 });
 
 test('21. imageMode=placeholder：上游收到的是文本占位，不含图片', async () => {

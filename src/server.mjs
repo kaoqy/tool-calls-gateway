@@ -779,7 +779,7 @@ async function handleChatCompletions(req, res, config, logger) {
   const maxPartBytes = config.maxMediaPartBytes ?? 8 * 1024 * 1024;
   if (mediaCounts.images > maxImages) {
     logger.warn('media guard: too many images', { images: mediaCounts.images, limit: maxImages });
-    return sendError(res, 413, 'payload_too_large', `单次请求图片过多（${mediaCounts.images} 张，上限 ${maxImages} 张）`, {
+    return sendError(res, 413, 'payload_too_large', `单次请求图片过多或过大（图片 ${mediaCounts.images} 张，上限 ${maxImages} 张）`, {
       images: mediaCounts.images,
       limit: maxImages,
     });
@@ -790,7 +790,7 @@ async function handleChatCompletions(req, res, config, logger) {
       res,
       413,
       'payload_too_large',
-      `单个媒体 part 过大（${formatBytes(mediaSizes.maxPartBytes)}，上限 ${formatBytes(maxPartBytes)}）`,
+      `单次请求图片过多或过大（单个 part ${formatBytes(mediaSizes.maxPartBytes)}，上限 ${formatBytes(maxPartBytes)}）`,
       { bytes: mediaSizes.maxPartBytes, limit: maxPartBytes },
     );
   }
